@@ -1,0 +1,1198 @@
+-- Executor version: run this entire file, including the embedded source.
+-- Automatic re-execution requires queue_on_teleport / queueonteleport.
+local source = [====[
+-- LOCKED build viewer + reroll, slot, and emote controls.
+-- LocalScript in StarterPlayer > StarterPlayerScripts. P unloads.
+-- Rerolls spend yen. The keybind request is sent before a non-color yen-floor
+-- rejoin; a client script cannot confirm a rollback or force server persistence.
+-- Slot/emote results depend on the game's server handlers.
+local SCRIPT_SOURCE, RESUME_JSON = ...
+local HttpService = game:GetService("HttpService")
+local executorEnv = type(getgenv) == "function" and getgenv() or _G
+local restored
+if type(RESUME_JSON) == "string" then
+    local ok, state = pcall(function() return HttpService:JSONDecode(RESUME_JSON) end)
+    if ok and type(state) == "table" then restored = state end
+end
+local previous = executorEnv.__LOCKEDBuildRoller
+if type(previous) == "table" and type(previous.unload) == "function" then pcall(previous.unload) end
+local session = {}
+executorEnv.__LOCKEDBuildRoller = session
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local UIS = game:GetService("UserInputService")
+local Stats = game:GetService("Stats")
+local TeleportService = game:GetService("TeleportService")
+local ContentProvider = game:GetService("ContentProvider")
+local RunService = game:GetService("RunService")
+local player = Players.LocalPlayer
+-- No game.Loaded, character, or asset wait before creating the controls.
+while not player do task.wait(0.01); player = Players.LocalPlayer end
+local playerGui = player:FindFirstChildOfClass("PlayerGui")
+while not playerGui do task.wait(0.01); playerGui = player:FindFirstChildOfClass("PlayerGui") end
+
+local CONFIG = {
+    -- Window dimensions in pixels; width and height resize independently.
+    DefaultWidth = 600,
+    DefaultHeight = 640,
+    MinWidth = 360,
+    MinHeight = 280,
+    MaxWidth = 1000,
+    MaxHeight = 1000,
+    CornerRadius = 4, ImageId = "rbxassetid://110347942431937",
+    PreviewId = "rbxthumb://type=Asset&id=110347942431937&w=420&h=420",
+    ResponseTimeout = 8, SameResultGrace = 0.5, RejoinDelay = 2, MissingPingMilliseconds = 100,
+    SlotTarget = "1", ResetWait = 10, SlotWait = 2, SlotTimeout = 15, ActionDelay = 0.1,
+    GuiDisplayOrder = 2147483647, RollbackWait = 0.2,
+    AutoResumeAfterRollback = true, ResumeYenTimeout = 15,
+    CornerHitbox = 24,
+}
+if restored and type(restored.config) == "table" then
+    for key, value in pairs(restored.config) do
+        if CONFIG[key] ~= nil and type(value) == type(CONFIG[key]) then CONFIG[key] = value end
+    end
+end
+local REMOTE_NAMES = {
+    Weapon = "specreroll", Trait = "traitreroll", Height = "heightreroll",
+    Face = "facereroll", Flow = "flowreroll", Buff = "buffreroll", Color = "aurareroll",
+}
+local FALLBACK_WEAPONS = {"Accelerate","Acrobatic","AceEater","Chigiri","CopyCat","DirectShot","Emperor","Formless","GodSpeed","IronHead","King","Kunigami","Leader","LongLegs","Monster","Nagi","Neurotic","Planetary","Repel","Riptide","Rough","Serpent","Shadow","Snatch","SwordScrew","Updraft","Voracious","WatchTower","Web"}
+local FALLBACK_TRAITS = {"Ambidextrous","Athlete","Bunnys","Calculate","Clamps","Claw","Consistent","Destruction","Diver","Dragon","Egoist","Fortune","GoldenZone","LongStrides","Metavision","NoLook","Powerhouse","Puppeteer","QuickDraw","Revolver","Ripper","Surf","Tank","Tireless","TwinGuns","Unbreakable"}
+for _, name in ipairs({"LOCKED_Build_Auto_Roller", "LOCKED_Build_Viewer", "ResizableImageViewer"}) do
+    local old = playerGui:FindFirstChild(name)
+    if old then old:Destroy() end
+end
+local function make(class, props, parent)
+    local obj = Instance.new(class)
+    for key, value in pairs(props) do obj[key] = value end
+    obj.Parent = parent
+    return obj
+end
+local gui = make("ScreenGui", {
+    Name = "LOCKED_Build_Auto_Roller", ResetOnSpawn = false,
+    DisplayOrder = CONFIG.GuiDisplayOrder, Enabled = true,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}, playerGui)
+local root = make("Frame", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0, Visible = true}, gui)
+local window = make("CanvasGroup", {
+    Name = "BuildWindow", Position = UDim2.fromOffset(30, 35),
+    Size = UDim2.fromOffset(
+        math.clamp(CONFIG.DefaultWidth, CONFIG.MinWidth, CONFIG.MaxWidth),
+        math.clamp(CONFIG.DefaultHeight, CONFIG.MinHeight, CONFIG.MaxHeight)
+    ),
+    BackgroundTransparency = 1, BorderSizePixel = 0, ClipsDescendants = true,
+    Visible = true, GroupTransparency = 0,
+}, root)
+make("UICorner", {CornerRadius = UDim.new(0, CONFIG.CornerRadius)}, window)
+local imageSize = math.max(CONFIG.MaxWidth, CONFIG.MaxHeight)
+local background = make("ImageLabel", {
+    Name = "FixedBackground", Position = UDim2.fromOffset(0, 0), Size = UDim2.fromOffset(imageSize, imageSize),
+    BackgroundColor3 = Color3.fromRGB(30, 13, 18), BorderSizePixel = 0,
+    Image = CONFIG.ImageId, ScaleType = Enum.ScaleType.Fit, ZIndex = 1,
+}, window)
+make("Frame", {Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.fromRGB(7, 10, 16), BackgroundTransparency = 0.28, BorderSizePixel = 0, ZIndex = 2}, window)
+local connections, closed = {}, false
+local loweredScreens, watchedScreens = {}, {}
+local activeJob, teleporting, pendingRollback
+local function connect(signal, callback)
+    local c = signal:Connect(callback)
+    table.insert(connections, c)
+    return c
+end
+local function cleanup()
+    if closed then return end
+    closed = true
+    pendingRollback = false
+    if activeJob then activeJob.cancelled = true end
+    for _, c in ipairs(connections) do c:Disconnect() end
+    table.clear(connections)
+    for screen, originalOrder in pairs(loweredScreens) do
+        pcall(function()
+            if screen.Parent and screen.DisplayOrder == CONFIG.GuiDisplayOrder - 1 then
+                screen.DisplayOrder = originalOrder
+            end
+        end)
+    end
+    table.clear(loweredScreens)
+    table.clear(watchedScreens)
+end
+connect(gui.Destroying, cleanup)
+local function unload() cleanup(); gui:Destroy() end
+session.unload = unload
+
+-- Stay above PlayerGui game overlays, including ones created on respawn.
+-- Roblox CoreGui, system dialogs, and teleport screens are separate layers.
+local function enforceViewerLayer()
+    if closed then return end
+    if gui.DisplayOrder ~= CONFIG.GuiDisplayOrder then gui.DisplayOrder = CONFIG.GuiDisplayOrder end
+    if not gui.Enabled then gui.Enabled = true end
+    if gui.ResetOnSpawn then gui.ResetOnSpawn = false end
+    if not root.Visible then root.Visible = true end
+    if not window.Visible then window.Visible = true end
+    if window.GroupTransparency ~= 0 then window.GroupTransparency = 0 end
+end
+for _, property in ipairs({"DisplayOrder", "Enabled", "ResetOnSpawn"}) do
+    connect(gui:GetPropertyChangedSignal(property), enforceViewerLayer)
+end
+connect(root:GetPropertyChangedSignal("Visible"), enforceViewerLayer)
+connect(window:GetPropertyChangedSignal("Visible"), enforceViewerLayer)
+connect(window:GetPropertyChangedSignal("GroupTransparency"), enforceViewerLayer)
+local function watchGameScreen(screen)
+    if closed or screen == gui or not screen:IsA("ScreenGui") or watchedScreens[screen] then return end
+    watchedScreens[screen] = true
+    local function keepBelowViewer()
+        if closed or not screen:IsDescendantOf(playerGui) then return end
+        if screen.DisplayOrder >= CONFIG.GuiDisplayOrder then
+            if loweredScreens[screen] == nil then loweredScreens[screen] = screen.DisplayOrder end
+            screen.DisplayOrder = CONFIG.GuiDisplayOrder - 1
+        end
+        enforceViewerLayer()
+    end
+    connect(screen:GetPropertyChangedSignal("DisplayOrder"), keepBelowViewer)
+    keepBelowViewer()
+end
+connect(playerGui.DescendantAdded, watchGameScreen)
+for _, screen in ipairs(playerGui:GetDescendants()) do watchGameScreen(screen) end
+enforceViewerLayer()
+local yenBanner = make("TextLabel", {
+    Name = "CurrentYen", Position = UDim2.fromOffset(12, 10),
+    Size = UDim2.new(1, -24, 0, 24), BackgroundTransparency = 1,
+    Text = "Current yen: loading...", TextSize = 16, Font = Enum.Font.GothamBold,
+    TextColor3 = Color3.fromRGB(255, 231, 234), TextXAlignment = Enum.TextXAlignment.Left,
+    ZIndex = 10,
+}, window)
+
+local function column(name, xScale, xOffset)
+    local scroll = make("ScrollingFrame", {
+        Name = name, Position = UDim2.new(xScale, xOffset, 0, 44), Size = UDim2.new(0.5, -18, 1, -56),
+        BackgroundTransparency = 1, BorderSizePixel = 0, CanvasSize = UDim2.new(),
+        AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollBarThickness = 3,
+        ScrollBarImageColor3 = Color3.fromRGB(245, 135, 145), ZIndex = 5,
+    }, window)
+    make("UIListLayout", {Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder}, scroll)
+    make("UIPadding", {PaddingBottom = UDim.new(0, 8)}, scroll)
+    return scroll
+end
+local left, right = column("LeftControls", 0, 12), column("RightControls", 0.5, 6)
+local order = 0
+local function card(parent, title)
+    order = order + 1
+    local frame = make("Frame", {
+        Name = title, Size = UDim2.new(1, -5, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundColor3 = Color3.fromRGB(19, 22, 32), BackgroundTransparency = 0.16,
+        BorderSizePixel = 0, LayoutOrder = order,
+    }, parent)
+    make("UICorner", {CornerRadius = UDim.new(0, 4)}, frame)
+    make("UIPadding", {PaddingLeft = UDim.new(0, 9), PaddingRight = UDim.new(0, 9), PaddingTop = UDim.new(0, 9), PaddingBottom = UDim.new(0, 9)}, frame)
+    make("UIListLayout", {Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder}, frame)
+    make("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 22), BackgroundTransparency = 1, Text = title,
+        TextColor3 = Color3.fromRGB(255, 231, 234), TextSize = 14,
+        Font = Enum.Font.GothamBold, TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = 0,
+    }, frame)
+    return frame
+end
+local function label(parent, text, height)
+    return make("TextLabel", {
+        Size = UDim2.new(1, 0, 0, height or 28), BackgroundTransparency = 1,
+        Text = text, TextWrapped = true, TextSize = 12, Font = Enum.Font.Gotham,
+        TextColor3 = Color3.fromRGB(231, 235, 246), TextXAlignment = Enum.TextXAlignment.Left,
+        LayoutOrder = #parent:GetChildren(),
+    }, parent)
+end
+local function button(parent, text, callback)
+    local b = make("TextButton", {
+        Size = UDim2.new(1, 0, 0, 30), BackgroundColor3 = Color3.fromRGB(104, 40, 54),
+        BorderSizePixel = 0, Text = text, TextSize = 12, TextWrapped = true,
+        Font = Enum.Font.GothamMedium, TextColor3 = Color3.new(1, 1, 1), LayoutOrder = #parent:GetChildren(),
+    }, parent)
+    make("UICorner", {CornerRadius = UDim.new(0, 4)}, b)
+    connect(b.Activated, callback)
+    return b
+end
+local statusCard = card(left, "LIVE BUILD")
+local live = {}
+for _, key in ipairs({"Player", "Yen", "Weapon", "Trait", "Height", "Flow", "Buff", "Percent", "Color", "Face"}) do
+    live[key] = label(statusCard, key .. ": loading...", key == "Color" and 38 or 28)
+end
+local swatch = make("Frame", {Size = UDim2.new(1, 0, 0, 14), BackgroundColor3 = Color3.fromRGB(60, 60, 60), BorderSizePixel = 0, LayoutOrder = 20}, statusCard)
+make("UICorner", {CornerRadius = UDim.new(0, 4)}, swatch)
+local facePreview = make("ImageLabel", {Size = UDim2.fromOffset(50, 50), Image = "", Visible = false, BackgroundColor3 = Color3.fromRGB(202, 179, 152), BorderSizePixel = 0, LayoutOrder = 21}, statusCard)
+make("UICorner", {CornerRadius = UDim.new(0, 4)}, facePreview)
+local sessionCard = card(right, "SESSION")
+local status = label(sessionCard, "Idle. Choose a target, then Start.", 58)
+local pingLabel = label(sessionCard, "Ping: loading...", 30)
+local requestLabel = label(sessionCard, "Reroll requests: 0", 24)
+local function setStatus(text) if not closed then status.Text = text end end
+
+-- Searchable dropdown shared by all target fields; rendered above both columns.
+local dropdownState
+local shade = make("TextButton", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "", Visible = false, ZIndex = 40}, root)
+local popup = make("Frame", {Size = UDim2.fromOffset(280, 250), BackgroundColor3 = Color3.fromRGB(22, 25, 36), BorderSizePixel = 0, Visible = false, ZIndex = 50}, root)
+make("UICorner", {CornerRadius = UDim.new(0, 4)}, popup)
+local search = make("TextBox", {Position = UDim2.fromOffset(8, 8), Size = UDim2.new(1, -16, 0, 30), Text = "", PlaceholderText = "Search...", ClearTextOnFocus = false, TextSize = 13, Font = Enum.Font.Gotham, TextColor3 = Color3.new(1, 1, 1), BackgroundColor3 = Color3.fromRGB(40, 44, 58), BorderSizePixel = 0}, popup)
+local choices = make("ScrollingFrame", {Position = UDim2.fromOffset(8, 44), Size = UDim2.new(1, -16, 1, -52), BackgroundTransparency = 1, BorderSizePixel = 0, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollBarThickness = 3}, popup)
+make("UIListLayout", {Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder}, choices)
+local function closeDropdown()
+    dropdownState = nil
+    popup.Visible, shade.Visible = false, false
+    search:ReleaseFocus()
+end
+connect(shade.Activated, closeDropdown)
+local choiceConnections = {}
+local function renderChoices()
+    for _, c in ipairs(choiceConnections) do c:Disconnect() end
+    table.clear(choiceConnections)
+    for _, obj in ipairs(choices:GetChildren()) do if obj:IsA("TextButton") or obj:IsA("TextLabel") then obj:Destroy() end end
+    if not dropdownState then return end
+    local query, count = string.lower(search.Text), 0
+    for _, item in ipairs(dropdownState.items) do
+        if string.find(string.lower(item.label), query, 1, true) then
+            count = count + 1
+            local b = make("TextButton", {Size = UDim2.new(1, -5, 0, 28), BackgroundColor3 = Color3.fromRGB(45, 35, 49), BorderSizePixel = 0, Text = item.label, TextSize = 12, TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.Gotham, LayoutOrder = count}, choices)
+            table.insert(choiceConnections, b.Activated:Connect(function()
+                local state = dropdownState
+                if not state then return end
+                state.selected(item.value, item.label)
+                closeDropdown()
+            end))
+        end
+    end
+    if count == 0 then label(choices, "No options loaded or no search match.", 46) end
+end
+connect(search:GetPropertyChangedSignal("Text"), renderChoices)
+connect(gui.Destroying, function() for _, c in ipairs(choiceConnections) do c:Disconnect() end end)
+local function openDropdown(anchor, items, selected)
+    if closed or activeJob or teleporting or pendingRollback then setStatus("Stop the current action before changing targets."); return end
+    closeDropdown()
+    local screen = root.AbsoluteSize
+    local width, height = math.min(280, screen.X), math.min(250, screen.Y)
+    local pos = anchor.AbsolutePosition - root.AbsolutePosition
+    local x = math.clamp(pos.X, 0, math.max(0, screen.X - width))
+    local y = pos.Y + anchor.AbsoluteSize.Y
+    if y + height > screen.Y then y = pos.Y - height end
+    popup.Size = UDim2.fromOffset(width, height)
+    popup.Position = UDim2.fromOffset(x, math.clamp(y, 0, math.max(0, screen.Y - height)))
+    dropdownState = {items = items, selected = selected}
+    search.Text = ""
+    popup.Visible, shade.Visible = true, true
+    choices.CanvasPosition = Vector2.new(0, 0)
+    renderChoices()
+end
+local function selection(parent, caption, getItems, onSelect, defaultValue)
+    label(parent, caption, 22)
+    local selected, selectedLabel = defaultValue, defaultValue
+    local b
+    b = button(parent, defaultValue or "Choose target...", function()
+        openDropdown(b, getItems(), function(value, display)
+            selected, selectedLabel = value, display
+            b.Text = display
+            if onSelect then onSelect(value) end
+        end)
+    end)
+    return {
+        get = function() return selected end,
+        label = function() return selectedLabel end,
+        set = function(value, display)
+            selected, selectedLabel = value, display or tostring(value)
+            b.Text = value ~= nil and selectedLabel or "Choose target..."
+        end,
+    }
+end
+local function numericInput(parent, caption, defaultValue, minimum, maximum)
+    label(parent, caption, 22)
+    local value = defaultValue
+    local box = make("TextBox", {
+        Size = UDim2.new(1, 0, 0, 29), Text = tostring(defaultValue), ClearTextOnFocus = false,
+        BackgroundColor3 = Color3.fromRGB(35, 38, 51), BorderSizePixel = 0, TextSize = 13,
+        Font = Enum.Font.Gotham, TextColor3 = Color3.new(1, 1, 1), LayoutOrder = #parent:GetChildren(),
+    }, parent)
+    make("UICorner", {CornerRadius = UDim.new(0, 4)}, box)
+    local function commit()
+        local n = tonumber(box.Text)
+        if not n or n ~= n or math.abs(n) == math.huge then
+            box.Text = tostring(value); setStatus("Enter a valid number for " .. caption); return value
+        end
+        value = math.clamp(n, minimum, maximum)
+        box.Text = tostring(value)
+        return value
+    end
+    connect(box.FocusLost, commit)
+    return {get = commit, box = box, set = function(n)
+        if type(n) == "number" and n == n and math.abs(n) < math.huge then
+            value = math.clamp(n, minimum, maximum); box.Text = tostring(value)
+        end
+    end}
+end
+local function namedItems(names)
+    local items = {}
+    for _, name in ipairs(names) do table.insert(items, {label = name, value = name}) end
+    return items
+end
+
+-- Use the same build locations as your working viewer.
+local function value(obj)
+    if obj and obj:IsA("ValueBase") then return obj.Value end
+    return nil
+end
+local function marked(container, kind)
+    if container then
+        for _, obj in ipairs(container:GetChildren()) do
+            if not obj:IsA("Folder") and obj:GetAttribute("type") == kind then return obj end
+        end
+    end
+    return nil
+end
+local function faceDecal(character)
+    if not character then return end
+    local face = character:FindFirstChild("face")
+    if face and face:IsA("ObjectValue") then face = face.Value end
+    if face then
+        if face:IsA("Decal") then return face end
+        local decal = face:FindFirstChild("Decal", true) or face:FindFirstChildWhichIsA("Decal", true)
+        if decal and decal:IsA("Decal") then return decal end
+    end
+    local head = character:FindFirstChild("Head")
+    return head and head:FindFirstChildWhichIsA("Decal")
+end
+local function textureKey(texture)
+    if not texture then return end
+    return texture:match("[?&]id=(%d+)") or texture:match("rbxassetid://(%d+)") or texture
+end
+local faceNames, faceTextures, headsRef = {}, {}, nil
+local lastFaceIndex = -math.huge
+local function indexFaces(force)
+    local heads = workspace:FindFirstChild("Heads")
+    if not force and heads == headsRef and os.clock() - lastFaceIndex < 2 then return end
+    headsRef, lastFaceIndex = heads, os.clock()
+    faceNames, faceTextures = {}, {}
+    if heads then
+        for _, obj in ipairs(heads:GetChildren()) do
+            if obj:IsA("BasePart") then
+                local decal = obj:FindFirstChildWhichIsA("Decal", true)
+                if decal and decal.Texture ~= "" then
+                    local key = textureKey(decal.Texture)
+                    faceNames[key], faceTextures[obj.Name] = obj.Name, key
+                end
+            end
+        end
+    end
+end
+local function readBuild()
+    indexFaces(false)
+    local character = player.Character
+    local backpack = player:FindFirstChildOfClass("Backpack")
+    local weapon = marked(backpack, "weapon") or marked(character, "weapon")
+    local trait = marked(backpack and backpack:FindFirstChild("Trait"), "trait")
+    local flows = backpack and backpack:FindFirstChild("FlowType")
+    local flow
+    if flows then for _, obj in ipairs(flows:GetChildren()) do if obj:IsA("ValueBase") then flow = obj; break end end end
+    local aura = character and character:FindFirstChild("AuraColour")
+    local buff = aura and aura:FindFirstChild("Buff")
+    local decal = faceDecal(character)
+    local texture = decal and textureKey(decal.Texture)
+    local rank = character and character:FindFirstChild("RankSystem")
+    local yen = tonumber(value(rank and rank:FindFirstChild("Yen")))
+    local heightNode = character and character:FindFirstChild("HeightValue")
+    local height = tonumber(value(heightNode))
+    local amount = buff and tonumber(buff:GetAttribute("BuffValue"))
+    local r = tonumber(value(aura and aura:FindFirstChild("Red")))
+    local g = tonumber(value(aura and aura:FindFirstChild("Green")))
+    local b = tonumber(value(aura and aura:FindFirstChild("Blue")))
+    return {
+        character = character, yen = yen,
+        Weapon = weapon and weapon.Name, Trait = trait and trait.Name,
+        Height = height and math.floor(height + 0.5), Flow = flow and flow.Name,
+        Buff = amount and amount * 10, buffName = value(buff),
+        Face = texture and faceNames[texture], faceTexture = texture,
+        Color = r and g and b and {math.floor(math.clamp(r, 0, 1) * 255 + 0.5), math.floor(math.clamp(g, 0, 1) * 255 + 0.5), math.floor(math.clamp(b, 0, 1) * 255 + 0.5)} or nil,
+        nodes = {Weapon = weapon, Trait = trait, Height = heightNode, Flow = flow, Face = decal, Buff = buff, Color = aura},
+    }
+end
+local function heightText(index)
+    if not index then return "Loading..." end
+    if index < 1 or index > 13 then return "Value " .. tostring(index) end
+    local inches = index + 62
+    return string.format("%d'%d\"", math.floor(inches / 12), inches % 12)
+end
+local function describe(name, obj)
+    if not name then return "Loading..." end
+    local specs = RS:FindFirstChild("Specs")
+    local template = specs and specs:FindFirstChild(name, true)
+    local rarity = obj and obj:GetAttribute("rarity") or template and template:GetAttribute("rarity")
+    return name .. (rarity and " (" .. tostring(rarity) .. ")" or "")
+end
+local function catalog(kind)
+    if kind == "Height" then
+        local items = {}
+        for i = 1, 13 do table.insert(items, {label = heightText(i), value = i}) end
+        return items
+    end
+    local names, seen = {}, {}
+    local function add(name) if not seen[name] then seen[name] = true; table.insert(names, name) end end
+    local specs = RS:FindFirstChild("Specs")
+    if kind == "Weapon" then
+        if specs then
+            for _, obj in ipairs(specs:GetChildren()) do
+                if obj:GetAttribute("type") == "weapon" or obj:GetAttribute("weapontype") ~= nil then add(obj.Name) end
+            end
+        end
+        if #names == 0 then for _, name in ipairs(FALLBACK_WEAPONS) do add(name) end end
+    elseif kind == "Trait" then
+        local traits = specs and specs:FindFirstChild("Traits")
+        if traits then for _, obj in ipairs(traits:GetChildren()) do add(obj.Name) end end
+        if #names == 0 then for _, name in ipairs(FALLBACK_TRAITS) do add(name) end end
+    elseif kind == "Flow" then
+        local types = RS:FindFirstChild("FlowTypes")
+        local values = types and types:FindFirstChild("FlowValues")
+        if values then for _, obj in ipairs(values:GetChildren()) do add(obj.Name) end end
+    elseif kind == "Face" then
+        indexFaces(true)
+        for name in pairs(faceTextures) do add(name) end
+    end
+    table.sort(names, function(a, b) return string.lower(a) < string.lower(b) end)
+    return namedItems(names)
+end
+
+local yenFloor = numericInput(sessionCard, "Minimum yen", 3000, 0, 1000000000000)
+label(sessionCard, "At minimum yen: request rollback, then rejoin. Flow color uses slot switches instead.", 56)
+local hitAction = selection(sessionCard, "When the target is reached", function() return namedItems({"Rejoin", "Stop"}) end, nil, "Rejoin")
+label(sessionCard, "Flow color: reset once, then switch slot at the yen floor. Rejoin on a match.", 56)
+local targets = {}
+local startRolling, stopRolling, rejoin, dupeSlot, getEmotes, redeemCodes, redeemQuests, thirdSlot, manualRollback
+for _, entry in ipairs({
+    {"Weapon", "WEAPON", left}, {"Trait", "TRAIT", left}, {"Height", "HEIGHT", left},
+    {"Face", "FACE", right}, {"Flow", "FLOW TYPE", right},
+}) do
+    local kind, title, parent = entry[1], entry[2], entry[3]
+    local frame = card(parent, title)
+    targets[kind] = selection(frame, "Target", function() return catalog(kind) end)
+    button(frame, "Start " .. string.lower(title), function() startRolling(kind) end)
+    button(frame, "Stop", function() stopRolling() end)
+end
+local buffCard = card(right, "FLOW BUFF")
+local buffTarget = selection(buffCard, "Required buff", function()
+    local names = {"speed", "power", "hitbox", "cooldown", "stamina"}
+    local current = readBuild().buffName
+    if type(current) == "string" and current ~= "" then
+        local found = false
+        for _, name in ipairs(names) do if string.lower(name) == string.lower(current) then found = true; break end end
+        if not found then table.insert(names, current) end
+    end
+    return namedItems(names)
+end, nil, "speed")
+local buffMinimum = numericInput(buffCard, "Keep buff percentage >=", 10, 0, 100)
+label(buffCard, "Keep only the selected buff at or above this percentage. BuffValue × 10.", 48)
+button(buffCard, "Start buff rerolls", function() startRolling("Buff") end)
+button(buffCard, "Stop", function() stopRolling() end)
+local colorCard = card(right, "FLOW COLOR")
+local redInput = numericInput(colorCard, "Target red (0–255)", 60, 0, 255)
+local greenInput = numericInput(colorCard, "Target green (0–255)", 140, 0, 255)
+local blueInput = numericInput(colorCard, "Target blue (0–255)", 255, 0, 255)
+local toleranceInput = numericInput(colorCard, "Tolerance per RGB channel", 10, 0, 255)
+local colorDirection = selection(colorCard, "Allowed difference", function() return namedItems({"Under", "Over", "Both"}) end, nil, "Both")
+label(colorCard, "Under/Over applies to each RGB channel. Both allows ± tolerance.", 46)
+button(colorCard, "Start color rerolls", function() startRolling("Color") end)
+button(colorCard, "Stop", function() stopRolling() end)
+local controls = card(left, "CONTROLS")
+button(controls, "Stop all rerolls", function() stopRolling() end)
+button(controls, "Rejoin current server", function() rejoin("Manual rejoin") end)
+button(controls, "Dupe second slot", function() dupeSlot() end)
+button(controls, "Get all emotes", function() getEmotes() end)
+button(controls, "Redeem all codes", function() redeemCodes() end)
+button(controls, "Redeem all quests", function() redeemQuests() end)
+button(controls, "Swap to third slot", function() thirdSlot() end)
+label(controls, "Emotes: the four pack requests in your supplied script.", 40)
+button(controls, "Refresh face catalog", function() indexFaces(true); setStatus("Catalog refreshed. Open any target dropdown for current options.") end)
+button(controls, "Unload (P)", unload)
+label(controls, "Drag empty background to move. Drag any edge/corner to resize.", 44)
+button(controls, "Rollback + rejoin", function() manualRollback() end)
+
+local restoredFaceTexture, restoredFaceTarget
+local function captureSettings(resumeKind, job)
+    local state = {
+        placeId = game.PlaceId, resumeKind = resumeKind, config = CONFIG, targets = {},
+        buffTarget = buffTarget.get(), minimum = buffMinimum.get(),
+        rgb = {redInput.get(), greenInput.get(), blueInput.get()},
+        tolerance = toleranceInput.get(), direction = colorDirection.get(),
+        yenFloor = yenFloor.get(), hitAction = hitAction.get(),
+        window = {width = window.Size.X.Offset, height = window.Size.Y.Offset,
+            x = window.Position.X.Offset, y = window.Position.Y.Offset},
+    }
+    for kind, field in pairs(targets) do
+        state.targets[kind] = {value = field.get(), label = field.label()}
+    end
+    local face = targets.Face.get()
+    state.faceTexture = face and (faceTextures[face] or (face == restoredFaceTarget and restoredFaceTexture))
+    -- Resume the running job's exact values, including edits to text boxes mid-roll.
+    if job and REMOTE_NAMES[job.kind] then
+        if targets[job.kind] then state.targets[job.kind] = {value = job.target, label = targets[job.kind].label()} end
+        state.buffTarget, state.minimum = job.buffTarget, job.minimum
+        state.rgb, state.tolerance, state.direction = job.rgb, job.tolerance, job.direction
+        state.yenFloor, state.hitAction = job.yenFloor, job.hitAction
+        if job.kind == "Face" then state.faceTexture = job.faceTexture end
+    end
+    return state
+end
+if restored then
+    for kind, saved in pairs(restored.targets or {}) do
+        if targets[kind] and type(saved) == "table" and saved.value ~= nil then targets[kind].set(saved.value, saved.label) end
+    end
+    restoredFaceTexture = restored.faceTexture
+    restoredFaceTarget = targets.Face.get()
+    if type(restored.buffTarget) == "string" then buffTarget.set(restored.buffTarget) end
+    buffMinimum.set(restored.minimum); yenFloor.set(restored.yenFloor)
+    if type(restored.rgb) == "table" then
+        redInput.set(restored.rgb[1]); greenInput.set(restored.rgb[2]); blueInput.set(restored.rgb[3])
+    end
+    toleranceInput.set(restored.tolerance)
+    if restored.direction == "Under" or restored.direction == "Over" or restored.direction == "Both" then colorDirection.set(restored.direction) end
+    if restored.hitAction == "Stop" or restored.hitAction == "Rejoin" then hitAction.set(restored.hitAction) end
+    if type(restored.window) == "table" then
+        local w = restored.window
+        if type(w.width) == "number" and type(w.height) == "number" then window.Size = UDim2.fromOffset(w.width, w.height) end
+        if type(w.x) == "number" and type(w.y) == "number" then window.Position = UDim2.fromOffset(w.x, w.y) end
+    end
+end
+local function teleportQueue()
+    if type(queue_on_teleport) == "function" then return queue_on_teleport end
+    if type(queueonteleport) == "function" then return queueonteleport end
+    for _, namespace in ipairs({"syn", "fluxus"}) do
+        local api = executorEnv[namespace]
+        if type(api) == "table" and type(api.queue_on_teleport) == "function" then return api.queue_on_teleport end
+    end
+    return nil
+end
+local function queueContinuation(state)
+    local queue = teleportQueue()
+    if not queue then return false, "Executor has no teleport queue; inject this file again after rejoining." end
+    if type(SCRIPT_SOURCE) ~= "string" then return false, "Run the complete supplied file so its source can be queued." end
+    local encoded = HttpService:JSONEncode(state)
+    local token = HttpService:GenerateGUID(false)
+    -- Self-contained: the actual script and settings travel together, with no URL.
+    local payload = string.format([[
+local e = type(getgenv) == "function" and getgenv() or _G
+if game.PlaceId ~= %d then return end
+local key = %q .. ":" .. game.JobId
+if e.__LOCKEDTeleportExecuted == key then return end
+e.__LOCKEDTeleportExecuted = key
+local source = %q
+local run, err = loadstring(source, "LOCKED Build Roller")
+if not run then error(err) end
+run(source, %q)
+]], game.PlaceId, token, SCRIPT_SOURCE, encoded)
+    local ok, err = pcall(queue, payload)
+    return ok, ok and nil or tostring(err)
+end
+
+local function pingMilliseconds()
+    local ok, number = pcall(function()
+        local stat = Stats.Network.ServerStatsItem:FindFirstChild("Data Ping")
+        return stat and stat:GetValue()
+    end)
+    if ok and type(number) == "number" and number >= 0 and number < math.huge then return number, true end
+    return CONFIG.MissingPingMilliseconds, false
+end
+local function rollDelay()
+    local milliseconds = pingMilliseconds()
+    return milliseconds / 1000 + 0.02
+end
+-- Returns channel-wise tolerance, not lexicographic ordering of a hex string.
+local function colorMatches(actual, desired, tolerance, direction)
+    if not actual then return false end
+    for i = 1, 3 do
+        local delta = actual[i] - desired[i]
+        if direction == "Under" then
+            if delta > 0.00001 or delta < -tolerance - 0.00001 then return false end
+        elseif direction == "Over" then
+            if delta < -0.00001 or delta > tolerance + 0.00001 then return false end
+        elseif math.abs(delta) > tolerance + 0.00001 then return false end
+    end
+    return true
+end
+local function matches(build, job)
+    if job.kind == "Buff" then
+        local actual = type(build.buffName) == "string" and build.buffName:match("^%s*(.-)%s*$") or ""
+        local desired = job.buffTarget or "speed"
+        return string.lower(actual) == string.lower(desired) and build.Buff ~= nil and build.Buff + 0.00001 >= job.minimum
+    end
+    if job.kind == "Color" then return colorMatches(build.Color, job.rgb, job.tolerance, job.direction) end
+    if job.kind == "Face" then
+        return build.Face == job.target or (job.faceTexture ~= nil and build.faceTexture == job.faceTexture)
+    end
+    return build[job.kind] ~= nil and build[job.kind] == job.target
+end
+local function ready(build, kind)
+    if kind == "Face" then return build.faceTexture ~= nil and build.faceTexture ~= "" end
+    return build[kind] ~= nil
+end
+local function fingerprint(build, kind)
+    if kind == "Color" then
+        return build.Color and string.format("%.6f|%.6f|%.6f", build.Color[1], build.Color[2], build.Color[3]) or "?"
+    elseif kind == "Face" then return tostring(build.faceTexture) end
+    return tostring(build[kind]) .. (kind == "Buff" and "|" .. tostring(build.buffName) or "")
+end
+stopRolling = function()
+    if pendingRollback then pendingRollback = false end
+    if activeJob then
+        activeJob.cancelled = true
+        setStatus("Stopping. Waiting for any pending request to finish.")
+    else setStatus("Stopped.") end
+end
+local function canWork(job)
+    return not closed and not teleporting and activeJob == job and not job.cancelled
+end
+local function waitForAvailable(job)
+    local announced = false
+    while canWork(job) do
+        local build = readBuild()
+        if build.yen ~= nil and ready(build, job.kind) then return build end
+        if not announced then
+            setStatus("Waiting for " .. job.kind .. "/yen to load; retrying reads automatically. Stop cancels.")
+            announced = true
+        end
+        task.wait(0.01)
+    end
+    return nil
+end
+local function waitForResponse(before, job, started, delay)
+    local originalFingerprint = fingerprint(before, job.kind)
+    local lastWaitingStatus = -math.huge
+    local dataMissing = false
+    while not closed and not teleporting and activeJob == job do
+        if job.cancelled and not pendingRollback then return nil, "Stopped." end
+        local elapsed = os.clock() - started
+        -- The delay starts at FireServer, overlapping the server response.
+        -- Check for the result once it expires, without a second quiet-period wait.
+        if elapsed >= delay then
+            local current = readBuild()
+            dataMissing = current.yen == nil or not ready(current, job.kind)
+            if current.yen ~= nil and ready(current, job.kind) then
+                local resultChanged = fingerprint(current, job.kind) ~= originalFingerprint or current.nodes[job.kind] ~= before.nodes[job.kind]
+                local yenChanged = current.yen ~= before.yen
+                -- Wait for the debit as well, so the next yen-floor check uses
+                -- the updated balance. An unchanged result still needs grace:
+                -- a debit alone can precede a late result with the same name.
+                local sameResultReady = elapsed >= math.max(CONFIG.SameResultGrace, delay * 4)
+                if yenChanged and (resultChanged or sameResultReady) then return current end
+            end
+        end
+        if elapsed >= CONFIG.ResponseTimeout then
+            if job.kind ~= "Color" and not dataMissing then return nil, "No confirmed roll update. Paused without sending another request." end
+            if os.clock() - lastWaitingStatus >= 2 then
+                setStatus("Waiting for the pending " .. job.kind .. " roll/build/yen update; retrying reads. Stop cancels.")
+                lastWaitingStatus = os.clock()
+            end
+        end
+        task.wait(0.01)
+    end
+    return nil, "Stopped."
+end
+connect(TeleportService.TeleportInitFailed, function(who, result, errorMessage)
+    if who == player and teleporting then
+        teleporting = false
+        setStatus("Rejoin failed: " .. tostring(errorMessage) .. ". Rerolls remain stopped.")
+    end
+end)
+rejoin = function(reason, continuation)
+    if closed or teleporting then return end
+    if activeJob then activeJob.cancelled = true end
+    teleporting = true
+    closeDropdown()
+    setStatus(reason .. ". Rejoining...")
+    task.spawn(function()
+        task.wait(CONFIG.RejoinDelay)
+        if closed then return end
+        local state = continuation or captureSettings(nil)
+        local queueOK, queued, problem = pcall(queueContinuation, state)
+        if not queueOK then problem, queued = queued, false end
+        if queued then
+            setStatus(state.resumeKind and "Settings saved; rejoining and resuming " .. state.resumeKind .. "..." or "Settings saved; rejoining with rerolls stopped...")
+        else
+            warn("LOCKED auto resume: " .. tostring(problem))
+            setStatus(tostring(problem) .. " Rejoining without auto resume.")
+        end
+        local ok, err = pcall(function()
+            if game.JobId ~= "" then
+                TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, player)
+            else TeleportService:Teleport(game.PlaceId, player) end
+        end)
+        if not ok and not closed then
+            teleporting = false
+            setStatus("Rejoin failed: " .. tostring(err) .. ". Rerolls remain stopped.")
+        end
+    end)
+end
+local totalRequests = 0
+local function finish(job, text)
+    if activeJob == job then activeJob = nil end
+    if not closed and not teleporting then setStatus(text) end
+end
+-- Used by flow color for this script session. Stopping/restarting
+-- a worker never repeats a reset that was already performed.
+local colorPreparation = {resetAt = nil, slotSentAt = nil, prepared = false}
+local function usesSlotCycle(kind)
+    return kind == "Color"
+end
+local function slotRemote()
+    local folder = RS:FindFirstChild("rerolls")
+    local remote = folder and folder:FindFirstChild("Slots")
+    if not remote or not remote:IsA("RemoteEvent") then error("Missing rerolls.Slots RemoteEvent", 0) end
+    return remote
+end
+local function waitInterruptible(job, duration)
+    local untilTime = os.clock() + math.max(0, duration)
+    while os.clock() < untilTime do
+        if not canWork(job) then return false end
+        task.wait(math.min(0.05, untilTime - os.clock()))
+    end
+    return canWork(job)
+end
+local function alive(build)
+    local humanoid = build.character and build.character:FindFirstChildOfClass("Humanoid")
+    return humanoid and humanoid.Health > 0
+end
+local function sendSlot(job, targetSlot)
+    slotRemote():FireServer(tostring(targetSlot or CONFIG.SlotTarget))
+    job.slotSwitches = (job.slotSwitches or 0) + 1
+    return os.clock()
+end
+local function waitForSlot(job, started, requireRefill)
+    local prior, lastChange = nil, started
+    local slotWait = job.kind == "Color" and 0 or CONFIG.SlotWait
+    local deadline = math.max(started, os.clock()) + CONFIG.SlotTimeout
+    -- Keep the worker occupied while a sent slot request is settling, even
+    -- when Stop was clicked. A second worker cannot overlap that request.
+    while not closed and not teleporting and activeJob == job do
+        if job.kind == "Color" and job.cancelled then return nil, "Stopped." end
+        local build = readBuild()
+        local loaded = build.yen ~= nil and alive(build) and (job.kind == "Slot" or ready(build, job.kind))
+        if loaded then
+            local key = tostring(build.yen) .. "|" .. (job.kind == "Slot" and "slot" or fingerprint(build, job.kind))
+            if not prior or key ~= prior.key or build.character ~= prior.character or build.nodes[job.kind] ~= prior.node then
+                prior = {key = key, character = build.character, node = build.nodes[job.kind]}
+                lastChange = os.clock()
+            end
+            local funded = not requireRefill or build.yen > job.yenFloor or matches(build, job)
+            if funded and os.clock() - started >= slotWait and (job.kind == "Color" or os.clock() - lastChange >= math.max(0.2, rollDelay())) then
+                return build
+            end
+        else
+            prior, lastChange = nil, os.clock()
+        end
+        if os.clock() >= deadline then
+            if job.kind == "Color" then
+                setStatus("Waiting for slot color/yen to load or refill; retrying reads. Stop cancels.")
+                deadline = os.clock() + 2
+            else
+                return nil, requireRefill and "Slot switch did not restore yen above the minimum. Paused." or "Character/build did not load after the slot switch. Paused."
+            end
+        end
+        task.wait(job.kind == "Color" and 0.01 or 0.05)
+    end
+    return nil, "Stopped."
+end
+local function prepareColor(job)
+    if colorPreparation.prepared then return true end
+    slotRemote() -- Validate before resetting the character.
+    if not colorPreparation.resetAt then
+        local character = player.Character
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        if not humanoid or humanoid.Health <= 0 then
+            setStatus("Waiting for your character before the initial reset; retrying automatically...")
+            while canWork(job) and (not humanoid or humanoid.Health <= 0) do
+                task.wait(0.05)
+                character = player.Character
+                humanoid = character and character:FindFirstChildOfClass("Humanoid")
+            end
+            if not canWork(job) then finish(job, "Stopped."); return false end
+        end
+        humanoid.Health = 0
+        colorPreparation.resetAt = os.clock()
+    end
+    if not colorPreparation.slotSentAt then
+        setStatus("Preparing flow color: waiting " .. CONFIG.ResetWait .. " seconds after the initial reset before switching slots...")
+        if not waitInterruptible(job, colorPreparation.resetAt + CONFIG.ResetWait - os.clock()) then finish(job, "Stopped."); return false end
+        colorPreparation.slotSentAt = sendSlot(job)
+    end
+    setStatus("Preparing flow color: slot " .. CONFIG.SlotTarget .. " requested; waiting for the build...")
+    local build, failure = waitForSlot(job, colorPreparation.slotSentAt, true)
+    if not build then finish(job, failure); return false end
+    colorPreparation.prepared = true
+    if not canWork(job) then finish(job, "Stopped. Flow color preparation is complete."); return false end
+    return true
+end
+dupeSlot = function()
+    if closed or teleporting then return end
+    if activeJob or pendingRollback then setStatus("Stop/wait for the current action before duplicating a slot."); return end
+    local character = player.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if not humanoid or humanoid.Health <= 0 then setStatus("Wait for your character to respawn first."); return end
+    local found, failure = pcall(slotRemote)
+    if not found then setStatus(tostring(failure)); return end
+    closeDropdown()
+    local job = {kind = "Slot", cancelled = false}
+    activeJob = job
+    task.spawn(function()
+        local ok, err = pcall(function()
+            if not canWork(job) then finish(job, "Slot sequence stopped."); return end
+            humanoid.Health = 0
+            setStatus("Dupe slot sequence: reset; waiting " .. CONFIG.ResetWait .. " seconds...")
+            if not waitInterruptible(job, CONFIG.ResetWait) then finish(job, "Slot sequence stopped."); return end
+            local started = sendSlot(job)
+            setStatus("Dupe slot sequence: slot " .. CONFIG.SlotTarget .. " requested; waiting for the build...")
+            local build, problem = waitForSlot(job, started, false)
+            if not canWork(job) then finish(job, "Slot sequence stopped."); return end
+            if not build then finish(job, problem); return end
+            finish(job, "Slot sequence sent.")
+            rejoin("Slot sequence completed")
+        end)
+        if not ok then finish(job, "Slot sequence paused: " .. tostring(err)) end
+    end)
+end
+getEmotes = function()
+    if closed or teleporting then return end
+    if activeJob or pendingRollback then setStatus("Stop/wait for the current action before requesting emotes."); return end
+    local folder = RS:FindFirstChild("Lockedtines")
+    local remote = folder and folder:FindFirstChild("ExclusiveAdd")
+    if not remote or not remote:IsA("RemoteEvent") then setStatus("Missing Lockedtines.ExclusiveAdd RemoteEvent."); return end
+    closeDropdown()
+    local job = {kind = "Emotes", cancelled = false}
+    activeJob = job
+    task.spawn(function()
+        local ok, err = pcall(function()
+            local packs = {"LockedtinesEmotepack", "IsagiPack", "BarouPack", "ReoPack"}
+            for i, pack in ipairs(packs) do
+                if not canWork(job) then finish(job, "Emote requests stopped."); return end
+                remote:FireServer(pack)
+                setStatus("Emote pack request " .. i .. "/" .. #packs .. ": " .. pack)
+                if i < #packs and not waitInterruptible(job, rollDelay()) then finish(job, "Emote requests stopped."); return end
+            end
+            finish(job, "Sent all four emote pack requests from your script.")
+        end)
+        if not ok then finish(job, "Emote requests paused: " .. tostring(err)) end
+    end)
+end
+local function runBatch(kind, remote, items, caption)
+    if closed or teleporting then return end
+    if activeJob or pendingRollback then setStatus("Stop/wait for the current action first."); return end
+    if not remote or not remote:IsA("RemoteEvent") then setStatus("Missing remote for " .. caption .. "."); return end
+    closeDropdown()
+    local job = {kind = kind, cancelled = false}
+    activeJob = job
+    task.spawn(function()
+        local ok, err = pcall(function()
+            for i, item in ipairs(items) do
+                if not canWork(job) then finish(job, caption .. " stopped."); return end
+                remote:FireServer(item)
+                setStatus(caption .. ": request " .. i .. "/" .. #items)
+                if i < #items and not waitInterruptible(job, CONFIG.ActionDelay) then finish(job, caption .. " stopped."); return end
+            end
+            finish(job, caption .. ": sent " .. #items .. " requests. The server decides which are eligible.")
+        end)
+        if not ok then finish(job, caption .. " paused: " .. tostring(err)) end
+    end)
+end
+redeemCodes = function()
+    local codes = {"120KFAVOURITE", "125MILVISITS", "DRAGONHEADER", "150KMEMBERS", "MEDALXLOCKED", "10KSUBS", "SEASON5WINNER", "CODE", "NEWCODE"}
+    runBatch("Codes", RS:FindFirstChild("SendCode"), codes, "Code redemption")
+end
+redeemQuests = function()
+    local folder = RS:FindFirstChild("Tasks")
+    local ids = {}
+    for id = -12, 12 do table.insert(ids, id) end
+    runBatch("Quests", folder and folder:FindFirstChild("RedeemAward"), ids, "Quest reward redemption")
+end
+thirdSlot = function()
+    if closed or teleporting then return end
+    if activeJob or pendingRollback then setStatus("Stop/wait for the current action before switching slots."); return end
+    local ok, problem = pcall(slotRemote)
+    if not ok then setStatus(tostring(problem)); return end
+    closeDropdown()
+    local job = {kind = "Slot", cancelled = false}
+    activeJob = job
+    task.spawn(function()
+        local worked, err = pcall(function()
+            if not canWork(job) then finish(job, "Slot switch stopped."); return end
+            local started = sendSlot(job, "2")
+            setStatus("Third slot requested. Waiting for the complete build...")
+            local build, failure = waitForSlot(job, started, false)
+            if not canWork(job) then finish(job, "Slot switch stopped."); return end
+            if not build then finish(job, failure); return end
+            finish(job, "Third slot loaded. No reset or rejoin sent.")
+        end)
+        if not worked then finish(job, "Slot switch paused: " .. tostring(err)) end
+    end)
+end
+local function targetReached(job)
+    finish(job, "Target reached after " .. job.requests .. " requests. No more rerolls sent.")
+    if job.hitAction == "Rejoin" then rejoin("Target reached") end
+end
+local function rollbackAndRejoin(job, reason)
+    local remotes = RS:FindFirstChild("rerolls")
+    local keybind = remotes and remotes:FindFirstChild("KeybindChange")
+    if not keybind or not keybind:IsA("RemoteEvent") then
+        finish(job, "Missing rerolls.KeybindChange. Paused without rejoining.")
+        return false
+    end
+    if not canWork(job) then finish(job, "Stopped."); return false end
+    if not job.rollbackSent then
+        local args = {[1] = "Right", [2] = "F\255"}
+        keybind:FireServer(table.unpack(args))
+        job.rollbackSent = true
+    end
+    setStatus(reason .. ". Keybind request sent; waiting before rejoin...")
+    if not waitInterruptible(job, CONFIG.RollbackWait) then
+        finish(job, "Stopped after the keybind request. Rejoin cancelled.")
+        return false
+    end
+    local resumeKind = CONFIG.AutoResumeAfterRollback and REMOTE_NAMES[job.kind] and job.kind or nil
+    local state = job.resumeState or captureSettings(resumeKind, job)
+    finish(job, reason .. ". No more rerolls sent.")
+    rejoin(reason .. "; keybind request sent", state)
+    return false
+end
+manualRollback = function()
+    if closed or teleporting or pendingRollback then return end
+    pendingRollback = true
+    closeDropdown()
+    local resumeState
+    if activeJob and REMOTE_NAMES[activeJob.kind] then
+        local resumeKind = CONFIG.AutoResumeAfterRollback and not matches(readBuild(), activeJob) and activeJob.kind or nil
+        resumeState = captureSettings(resumeKind, activeJob)
+    end
+    if activeJob then activeJob.cancelled = true end
+    setStatus("Manual rollback queued. Waiting for any pending action to finish...")
+    task.spawn(function()
+        while activeJob and pendingRollback and not closed and not teleporting do task.wait(0.01) end
+        if not pendingRollback or closed or teleporting then pendingRollback = false; return end
+        local job = {kind = "Rollback", cancelled = false, resumeState = resumeState}
+        activeJob, pendingRollback = job, false
+        local ok, err = pcall(function() rollbackAndRejoin(job, "Manual rollback") end)
+        if not ok then finish(job, "Manual rollback paused: " .. tostring(err)) end
+    end)
+end
+local function floorReached(job)
+    if job.slotCycle then
+        setStatus("Minimum yen reached. Switching slot " .. CONFIG.SlotTarget .. " without resetting...")
+        local started = sendSlot(job)
+        local build, failure = waitForSlot(job, started, true)
+        if not canWork(job) then finish(job, "Stopped. No further rerolls sent."); return false end
+        if not build then finish(job, failure); return false end
+        if matches(build, job) then targetReached(job); return false end
+        setStatus("Slot refreshed; continuing " .. job.kind .. " rerolls without another reset.")
+        return true
+    end
+    return rollbackAndRejoin(job, "Minimum yen reached")
+end
+startRolling = function(kind, resuming)
+    if closed or teleporting then return end
+    if activeJob or pendingRollback then setStatus("An action is active or pending. Stop/wait before starting another."); return end
+    closeDropdown()
+    local target = targets[kind] and targets[kind].get()
+    if kind ~= "Buff" and kind ~= "Color" and target == nil then setStatus("Choose a " .. kind .. " target first."); return end
+    if not REMOTE_NAMES[kind] then setStatus("Unknown reroll category."); return end
+    local job = {
+        kind = kind, target = target, faceTexture = target and (faceTextures[target] or (target == restoredFaceTarget and restoredFaceTexture)),
+        buffTarget = buffTarget.get(), minimum = buffMinimum.get(), rgb = {redInput.get(), greenInput.get(), blueInput.get()},
+        tolerance = toleranceInput.get(), direction = colorDirection.get(), yenFloor = yenFloor.get(),
+        hitAction = usesSlotCycle(kind) and "Rejoin" or hitAction.get(),
+        slotCycle = usesSlotCycle(kind), requests = 0, cancelled = false,
+    }
+    activeJob = job
+    task.spawn(function()
+        local ok, err = pcall(function()
+            if not canWork(job) then finish(job, "Stopped."); return end
+            local remote
+            while canWork(job) do
+                local folder = RS:FindFirstChild("rerolls")
+                remote = folder and folder:FindFirstChild(REMOTE_NAMES[kind])
+                if remote and remote:IsA("RemoteEvent") then break end
+                setStatus("Waiting for " .. REMOTE_NAMES[kind] .. " to replicate; starting automatically when available...")
+                task.wait(0.01)
+            end
+            if not canWork(job) then finish(job, "Stopped."); return end
+            local initial = waitForAvailable(job)
+            if not initial then finish(job, "Stopped."); return end
+            if resuming and initial.yen <= job.yenFloor and not matches(initial, job) then
+                local deadline = os.clock() + CONFIG.ResumeYenTimeout
+                while canWork(job) and os.clock() < deadline do
+                    setStatus("Resume waiting for yen above " .. job.yenFloor .. "; no rerolls sent yet...")
+                    local current = readBuild()
+                    if current.yen ~= nil and ready(current, kind) and (current.yen > job.yenFloor or matches(current, job)) then initial = current; break end
+                    task.wait(0.01)
+                end
+                if not canWork(job) then finish(job, "Stopped."); return end
+                if initial.yen <= job.yenFloor and not matches(initial, job) then
+                    finish(job, "Yen did not recover above the minimum after rejoin. Paused to avoid repeated rejoining."); return
+                end
+            end
+            -- Preserve an already-held target before performing any reset or switch.
+            if matches(initial, job) then targetReached(job); return end
+            if job.slotCycle and not prepareColor(job) then return end
+            while canWork(job) do
+                local before = waitForAvailable(job)
+                if not before then finish(job, "Stopped."); return end
+                -- Check the target before the yen floor; keep a win on the last affordable roll.
+                if matches(before, job) then targetReached(job); return end
+                if before.yen <= job.yenFloor then
+                    if not floorReached(job) then return end
+                else
+                    local delay = kind == "Color" and 0 or rollDelay()
+                    local started = os.clock()
+                    -- Only one request is pending across all seven categories.
+                    remote:FireServer()
+                    job.requests, totalRequests = job.requests + 1, totalRequests + 1
+                    setStatus("Rolling " .. kind .. " | request " .. job.requests .. " | waiting for the build/yen update...")
+                    requestLabel.Text = "Reroll requests: " .. totalRequests
+                    local after, failure = waitForResponse(before, job, started, delay)
+                    if job.cancelled or not canWork(job) then finish(job, "Stopped. No further rerolls sent."); return end
+                    if not after then finish(job, failure); return end
+                    if matches(after, job) then targetReached(job); return end
+                    if after.yen <= job.yenFloor and not floorReached(job) then return end
+                end
+            end
+            finish(job, "Stopped.")
+        end)
+        if not ok then finish(job, "Roll paused: " .. tostring(err)); warn("Build Auto Roller: " .. tostring(err)) end
+    end)
+end
+
+-- Borderless window movement and independent edge resizing.
+local mode, pointer, startPoint, startPosition, startSize
+local function fitScreen()
+    local screen = root.AbsoluteSize
+    if screen.X <= 0 or screen.Y <= 0 then return end
+    local width = math.clamp(window.Size.X.Offset, math.min(CONFIG.MinWidth, screen.X), math.min(CONFIG.MaxWidth, screen.X))
+    local height = math.clamp(window.Size.Y.Offset, math.min(CONFIG.MinHeight, screen.Y), math.min(CONFIG.MaxHeight, screen.Y))
+    window.Size = UDim2.fromOffset(width, height)
+    window.Position = UDim2.fromOffset(math.clamp(window.Position.X.Offset, 0, math.max(0, screen.X - width)), math.clamp(window.Position.Y.Offset, 0, math.max(0, screen.Y - height)))
+end
+local function begin(input, action)
+    if closed or mode or dropdownState then return end
+    if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then return end
+    mode, startPoint, startPosition, startSize = action, input.Position, window.Position, window.Size
+    pointer = input.UserInputType == Enum.UserInputType.Touch and input or nil
+end
+local function handle(name, pos, size, action, z)
+    local area = make("TextButton", {Name = name, Position = pos, Size = size, Text = "", BackgroundTransparency = 1, BorderSizePixel = 0, Active = true, AutoButtonColor = false, ZIndex = z}, window)
+    connect(area.InputBegan, function(input) begin(input, action) end)
+end
+handle("MoveBackground", UDim2.fromOffset(0, 0), UDim2.fromScale(1, 1), "move", 3)
+handle("LeftEdge", UDim2.fromOffset(0, 0), UDim2.new(0, 9, 1, 0), "L", 20)
+handle("RightEdge", UDim2.new(1, -9, 0, 0), UDim2.new(0, 9, 1, 0), "R", 20)
+handle("TopEdge", UDim2.fromOffset(0, 0), UDim2.new(1, 0, 0, 9), "T", 20)
+handle("BottomEdge", UDim2.new(0, 0, 1, -9), UDim2.new(1, 0, 0, 9), "B", 20)
+local cornerHitbox = CONFIG.CornerHitbox
+handle("TopLeft", UDim2.fromOffset(0, 0), UDim2.fromOffset(cornerHitbox, cornerHitbox), "LT", 21)
+handle("TopRight", UDim2.new(1, -cornerHitbox, 0, 0), UDim2.fromOffset(cornerHitbox, cornerHitbox), "RT", 21)
+handle("BottomLeft", UDim2.new(0, 0, 1, -cornerHitbox), UDim2.fromOffset(cornerHitbox, cornerHitbox), "LB", 21)
+handle("BottomRight", UDim2.new(1, -cornerHitbox, 1, -cornerHitbox), UDim2.fromOffset(cornerHitbox, cornerHitbox), "RB", 21)
+local function resizeAxis(pos, size, delta, leading, trailing, minimum, maximum, screen)
+    if leading then
+        local far = pos + size
+        local near = math.clamp(pos + delta, math.max(0, far - maximum), far - math.min(minimum, far))
+        return math.floor(near), math.floor(far - near)
+    elseif trailing then
+        local available = math.min(maximum, screen - pos)
+        return pos, math.floor(math.clamp(size + delta, math.min(minimum, available), available))
+    end
+    return pos, size
+end
+connect(UIS.InputChanged, function(input)
+    if closed or not mode then return end
+    if pointer then if input ~= pointer then return end
+    elseif input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+    local delta, screen = input.Position - startPoint, root.AbsoluteSize
+    local x, y, w, h = startPosition.X.Offset, startPosition.Y.Offset, startSize.X.Offset, startSize.Y.Offset
+    if mode == "move" then
+        window.Position = UDim2.fromOffset(math.clamp(x + delta.X, 0, math.max(0, screen.X - w)), math.clamp(y + delta.Y, 0, math.max(0, screen.Y - h)))
+    else
+        x, w = resizeAxis(x, w, delta.X, mode:find("L"), mode:find("R"), CONFIG.MinWidth, CONFIG.MaxWidth, screen.X)
+        y, h = resizeAxis(y, h, delta.Y, mode:find("T"), mode:find("B"), CONFIG.MinHeight, CONFIG.MaxHeight, screen.Y)
+        window.Position, window.Size = UDim2.fromOffset(x, y), UDim2.fromOffset(w, h)
+    end
+end)
+connect(UIS.InputEnded, function(input)
+    if (pointer and input == pointer) or (not pointer and input.UserInputType == Enum.UserInputType.MouseButton1) then mode, pointer = nil, nil end
+end)
+connect(UIS.InputBegan, function(input)
+    if input.KeyCode == Enum.KeyCode.P and not UIS:GetFocusedTextBox() then unload() end
+end)
+connect(root:GetPropertyChangedSignal("AbsoluteSize"), function() mode, pointer = nil, nil; closeDropdown(); fitScreen() end)
+task.defer(function() if not closed then fitScreen() end end)
+
+local lastKnownYen
+local function refreshBuild()
+    local build = readBuild()
+    live.Player.Text = player.DisplayName .. " (@" .. player.Name .. ")"
+    live.Yen.Text = "Yen: " .. (build.yen and tostring(build.yen) or "Loading...")
+    if build.yen ~= nil then
+        lastKnownYen = build.yen
+        yenBanner.Text = "Current yen: " .. tostring(build.yen)
+    else
+        yenBanner.Text = "Yen loading..." .. (lastKnownYen ~= nil and " (last: " .. tostring(lastKnownYen) .. ")" or "")
+    end
+    live.Weapon.Text = "Weapon: " .. describe(build.Weapon, build.nodes.Weapon)
+    live.Trait.Text = "Trait: " .. describe(build.Trait, build.nodes.Trait)
+    live.Height.Text = "Height: " .. heightText(build.Height)
+    live.Flow.Text = "Flow: " .. (build.Flow or "Loading...")
+    live.Buff.Text = "Buff: " .. tostring(build.buffName or "Loading...")
+    live.Percent.Text = "Buff %: " .. (build.Buff and string.format("%.1f%%", build.Buff) or "Loading...")
+    live.Face.Text = "Face: " .. (build.Face or (build.faceTexture and "Asset " .. build.faceTexture or "Loading..."))
+    facePreview.Visible = build.faceTexture ~= nil and build.faceTexture ~= ""
+    if facePreview.Visible then facePreview.Image = build.faceTexture:match("^%d+$") and "rbxassetid://" .. build.faceTexture or build.faceTexture end
+    if build.Color then
+        local r, g, b = math.floor(build.Color[1] + 0.5), math.floor(build.Color[2] + 0.5), math.floor(build.Color[3] + 0.5)
+        live.Color.Text = string.format("Color: #%02X%02X%02X\nRGB %d, %d, %d", r, g, b, r, g, b)
+        swatch.BackgroundColor3 = Color3.fromRGB(r, g, b)
+    else live.Color.Text = "Color: Loading..." end
+    local ping, available = pingMilliseconds()
+    if activeJob and activeJob.kind == "Color" then
+        pingLabel.Text = string.format("Ping: %.0f ms%s | color: no fixed delay; waits for each result", ping, available and "" or " (fallback)")
+    else
+        pingLabel.Text = string.format("Ping: %.0f ms%s | minimum delay %.3f s", ping, available and "" or " (fallback)", ping / 1000 + 0.02)
+    end
+end
+-- Background loading never sends any reroll requests.
+local previewUsed, currentImage = false, nil
+local loadBackground
+local function fallbackBackground()
+    if closed or previewUsed or background.IsLoaded then return end
+    previewUsed = true
+    loadBackground(CONFIG.PreviewId)
+end
+loadBackground = function(uri)
+    currentImage = uri
+    background.Image = uri
+    task.spawn(function()
+        local ok = pcall(function()
+            ContentProvider:PreloadAsync({background}, function(_, state)
+                if closed or currentImage ~= uri then return end
+                if state == Enum.AssetFetchStatus.Failure or state == Enum.AssetFetchStatus.TimedOut then fallbackBackground() end
+            end)
+        end)
+        if not ok and not closed and currentImage == uri then fallbackBackground() end
+    end)
+    task.delay(15, function() if not closed and currentImage == uri then fallbackBackground() end end)
+end
+loadBackground(CONFIG.ImageId)
+task.spawn(function()
+    while not closed do
+        local ok, err = pcall(refreshBuild)
+        if not ok then warn("Build viewer: " .. tostring(err)) end
+        task.wait(0.1)
+    end
+end)
+
+-- Resume once, only after a failed roll's rollback rejoin. A win restores the UI
+-- without starting another roll. Stop/P work even while data is still loading.
+if restored and restored.placeId == game.PlaceId and REMOTE_NAMES[restored.resumeKind] then
+    task.defer(function()
+        if not closed and not activeJob then startRolling(restored.resumeKind, true) end
+    end)
+end
+]====]
+local run, err = loadstring(source, "LOCKED Build Roller")
+if not run then error(err) end
+run(source, nil)
