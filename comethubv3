@@ -1,5 +1,5 @@
--- Executor version: run this entire file, including the embedded source.
--- Automatic re-execution requires queue_on_teleport / queueonteleport.
+-- Run this entire executor script, including the embedded source.
+-- Angular blue GUI, fixed-scale texture 114239702819151, and compact Oswald Bold buttons.
 local source = [====[
 -- LOCKED build viewer + reroll, slot, and emote controls.
 -- LocalScript in StarterPlayer > StarterPlayerScripts. P unloads.
@@ -39,8 +39,15 @@ local CONFIG = {
     MinHeight = 280,
     MaxWidth = 1000,
     MaxHeight = 1000,
-    CornerRadius = 4, ImageId = "rbxassetid://110347942431937",
-    PreviewId = "rbxthumb://type=Asset&id=110347942431937&w=420&h=420",
+    CornerRadius = 0,
+    PanelOutline = 5,
+    TopLeftCut = 34, TopRightCut = 14,
+    BottomLeftCut = 14, BottomRightCut = 34,
+    TextureImageId = "rbxassetid://114239702819151",
+    TextureWidth = 1000, TextureHeight = 1000, -- Fixed pixels per texture tile.
+    TextureTransparency = 0.75, -- 0 = strongest pattern; 1 = invisible.
+    BackgroundRGB = {68, 133, 227},
+    ButtonHeight = 36, ButtonTextSize = 18, ButtonCornerRadius = 2,
     ResponseTimeout = 8, SameResultGrace = 0.5, RejoinDelay = 2, MissingPingMilliseconds = 100,
     SlotTarget = "1", ResetWait = 10, SlotWait = 2, SlotTimeout = 15, ActionDelay = 0.1,
     GuiDisplayOrder = 2147483647, RollbackWait = 0.2,
@@ -52,6 +59,11 @@ if restored and type(restored.config) == "table" then
         if CONFIG[key] ~= nil and type(value) == type(CONFIG[key]) then CONFIG[key] = value end
     end
 end
+local OSWALD_BOLD = Font.new("rbxasset://fonts/families/Oswald.json", Enum.FontWeight.Bold, Enum.FontStyle.Normal)
+local OSWALD_REGULAR = Font.new("rbxasset://fonts/families/Oswald.json", Enum.FontWeight.Regular, Enum.FontStyle.Normal)
+local BLUE = Color3.fromRGB(table.unpack(CONFIG.BackgroundRGB))
+local BUTTON_BLACK = Color3.fromRGB(14, 14, 14)
+local BUTTON_OUTLINE = Color3.fromRGB(54, 54, 54)
 local REMOTE_NAMES = {
     Weapon = "specreroll", Trait = "traitreroll", Height = "heightreroll",
     Face = "facereroll", Flow = "flowreroll", Buff = "buffreroll", Color = "aurareroll",
@@ -80,17 +92,79 @@ local window = make("CanvasGroup", {
         math.clamp(CONFIG.DefaultWidth, CONFIG.MinWidth, CONFIG.MaxWidth),
         math.clamp(CONFIG.DefaultHeight, CONFIG.MinHeight, CONFIG.MaxHeight)
     ),
-    BackgroundTransparency = 1, BorderSizePixel = 0, ClipsDescendants = true,
+    BackgroundTransparency = 1,
+    BorderSizePixel = 0, ClipsDescendants = true,
     Visible = true, GroupTransparency = 0,
 }, root)
-make("UICorner", {CornerRadius = UDim.new(0, CONFIG.CornerRadius)}, window)
-local imageSize = math.max(CONFIG.MaxWidth, CONFIG.MaxHeight)
-local background = make("ImageLabel", {
-    Name = "FixedBackground", Position = UDim2.fromOffset(0, 0), Size = UDim2.fromOffset(imageSize, imageSize),
-    BackgroundColor3 = Color3.fromRGB(30, 13, 18), BorderSizePixel = 0,
-    Image = CONFIG.ImageId, ScaleType = Enum.ScaleType.Fit, ZIndex = 1,
-}, window)
-make("Frame", {Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.fromRGB(7, 10, 16), BackgroundTransparency = 0.28, BorderSizePixel = 0, ZIndex = 2}, window)
+-- True cut-corner silhouette. Thin clipped bands form the diagonals without
+-- covering the missing corners with black rectangles. Texture coordinates stay
+-- anchored to the window, so neither the pattern nor its scale jumps on resize.
+local panelBands = {}
+local function panelBand(index)
+    local band = panelBands[index]
+    if band then return band end
+    local outer = make("Frame", {
+        Name = "AngularOutline" .. index, BackgroundColor3 = Color3.new(0, 0, 0),
+        BorderSizePixel = 0, Active = false, ZIndex = 1,
+    }, window)
+    local inner = make("Frame", {
+        Name = "BlueSurface", BackgroundColor3 = BLUE, BorderSizePixel = 0,
+        ClipsDescendants = true, Active = false, ZIndex = 1,
+    }, outer)
+    local texture = make("ImageLabel", {
+        Name = "GrayscaleTexture", BackgroundTransparency = 1, BorderSizePixel = 0,
+        Size = UDim2.fromOffset(math.max(CONFIG.MaxWidth, CONFIG.TextureWidth), math.max(CONFIG.MaxHeight, CONFIG.TextureHeight)),
+        Image = CONFIG.TextureImageId, ImageColor3 = Color3.fromRGB(26, 76, 160),
+        ImageTransparency = CONFIG.TextureTransparency, ScaleType = Enum.ScaleType.Tile,
+        TileSize = UDim2.fromOffset(CONFIG.TextureWidth, CONFIG.TextureHeight),
+        Active = false, ZIndex = 1,
+    }, inner)
+    band = {outer = outer, inner = inner, texture = texture}
+    panelBands[index] = band
+    return band
+end
+local function updatePanelShape()
+    local w, h = window.AbsoluteSize.X, window.AbsoluteSize.Y
+    if w <= 0 or h <= 0 then w, h = window.Size.X.Offset, window.Size.Y.Offset end
+    w, h = math.floor(w), math.floor(h)
+    if w <= 0 or h <= 0 then return end
+    local function cut(amount) return math.floor(math.clamp(amount, 0, math.min(w, h) * 0.25)) end
+    local tl, tr = cut(CONFIG.TopLeftCut), cut(CONFIG.TopRightCut)
+    local bl, br = cut(CONFIG.BottomLeftCut), cut(CONFIG.BottomRightCut)
+    local border = math.clamp(CONFIG.PanelOutline, 1, math.min(w, h) * 0.1)
+    local diagonalBorder = border * math.sqrt(2)
+    local topRows = math.ceil(math.max(math.max(tl, tr) + diagonalBorder - border + 1, border + 1))
+    local bottomRows = math.ceil(math.max(math.max(bl, br) + diagonalBorder - border + 1, border + 1))
+    local used = 0
+    local function drawBand(y, height)
+        used = used + 1
+        local band = panelBand(used)
+        local sampleY = y + 0.5
+        local left = math.max(0, tl - sampleY, bl - (h - sampleY))
+        local right = w - math.max(0, tr - sampleY, br - (h - sampleY))
+        local x = math.floor(left)
+        band.outer.Position = UDim2.fromOffset(x, y)
+        band.outer.Size = UDim2.fromOffset(math.ceil(right) - x, height)
+        band.outer.Visible = true
+        local blueLeft = math.ceil(math.max(border, tl - sampleY + diagonalBorder, bl - (h - sampleY) + diagonalBorder))
+        local blueRight = math.floor(w - math.max(border, tr - sampleY + diagonalBorder, br - (h - sampleY) + diagonalBorder))
+        local blueY = math.max(y, math.ceil(border))
+        local blueEnd = math.min(y + height, h - math.ceil(border))
+        band.inner.Visible = blueRight > blueLeft and blueEnd > blueY
+        if band.inner.Visible then
+            band.inner.Position = UDim2.fromOffset(blueLeft - x, blueY - y)
+            band.inner.Size = UDim2.fromOffset(blueRight - blueLeft, blueEnd - blueY)
+            band.texture.Position = UDim2.fromOffset(-blueLeft, -blueY)
+        end
+    end
+    -- Put the large center band first; the preload target remains this texture.
+    drawBand(topRows, h - topRows - bottomRows)
+    for y = 0, topRows - 1 do drawBand(y, 1) end
+    for y = h - bottomRows, h - 1 do drawBand(y, 1) end
+    for i = used + 1, #panelBands do panelBands[i].outer.Visible = false end
+end
+updatePanelShape()
+local background = panelBands[1].texture
 local connections, closed = {}, false
 local loweredScreens, watchedScreens = {}, {}
 local activeJob, teleporting, pendingRollback
@@ -99,6 +173,7 @@ local function connect(signal, callback)
     table.insert(connections, c)
     return c
 end
+connect(window:GetPropertyChangedSignal("AbsoluteSize"), updatePanelShape)
 local function cleanup()
     if closed then return end
     closed = true
@@ -155,19 +230,19 @@ connect(playerGui.DescendantAdded, watchGameScreen)
 for _, screen in ipairs(playerGui:GetDescendants()) do watchGameScreen(screen) end
 enforceViewerLayer()
 local yenBanner = make("TextLabel", {
-    Name = "CurrentYen", Position = UDim2.fromOffset(12, 10),
-    Size = UDim2.new(1, -24, 0, 24), BackgroundTransparency = 1,
-    Text = "Current yen: loading...", TextSize = 16, Font = Enum.Font.GothamBold,
-    TextColor3 = Color3.fromRGB(255, 231, 234), TextXAlignment = Enum.TextXAlignment.Left,
+    Name = "CurrentYen", Position = UDim2.fromOffset(40, 10),
+    Size = UDim2.new(1, -80, 0, 24), BackgroundTransparency = 1,
+    Text = "Current yen: loading...", TextSize = 20, FontFace = OSWALD_BOLD,
+    TextColor3 = Color3.fromRGB(255, 255, 255), TextXAlignment = Enum.TextXAlignment.Left,
     ZIndex = 10,
 }, window)
 
 local function column(name, xScale, xOffset)
     local scroll = make("ScrollingFrame", {
-        Name = name, Position = UDim2.new(xScale, xOffset, 0, 44), Size = UDim2.new(0.5, -18, 1, -56),
+        Name = name, Position = UDim2.new(xScale, xOffset, 0, 44), Size = UDim2.new(0.5, -18, 1, -88),
         BackgroundTransparency = 1, BorderSizePixel = 0, CanvasSize = UDim2.new(),
         AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollBarThickness = 3,
-        ScrollBarImageColor3 = Color3.fromRGB(245, 135, 145), ZIndex = 5,
+        ScrollBarImageColor3 = Color3.fromRGB(225, 237, 255), ZIndex = 5,
     }, window)
     make("UIListLayout", {Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder}, scroll)
     make("UIPadding", {PaddingBottom = UDim.new(0, 8)}, scroll)
@@ -179,34 +254,43 @@ local function card(parent, title)
     order = order + 1
     local frame = make("Frame", {
         Name = title, Size = UDim2.new(1, -5, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
-        BackgroundColor3 = Color3.fromRGB(19, 22, 32), BackgroundTransparency = 0.16,
+        BackgroundTransparency = 1,
         BorderSizePixel = 0, LayoutOrder = order,
     }, parent)
-    make("UICorner", {CornerRadius = UDim.new(0, 4)}, frame)
     make("UIPadding", {PaddingLeft = UDim.new(0, 9), PaddingRight = UDim.new(0, 9), PaddingTop = UDim.new(0, 9), PaddingBottom = UDim.new(0, 9)}, frame)
     make("UIListLayout", {Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder}, frame)
     make("TextLabel", {
         Size = UDim2.new(1, 0, 0, 22), BackgroundTransparency = 1, Text = title,
-        TextColor3 = Color3.fromRGB(255, 231, 234), TextSize = 14,
-        Font = Enum.Font.GothamBold, TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = 0,
+        TextColor3 = Color3.fromRGB(255, 255, 255), TextSize = 18,
+        FontFace = OSWALD_BOLD, TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = 0,
     }, frame)
     return frame
 end
 local function label(parent, text, height)
     return make("TextLabel", {
         Size = UDim2.new(1, 0, 0, height or 28), BackgroundTransparency = 1,
-        Text = text, TextWrapped = true, TextSize = 12, Font = Enum.Font.Gotham,
+        Text = text, TextWrapped = true, TextSize = 15, FontFace = OSWALD_REGULAR,
         TextColor3 = Color3.fromRGB(231, 235, 246), TextXAlignment = Enum.TextXAlignment.Left,
         LayoutOrder = #parent:GetChildren(),
     }, parent)
 end
+local function styleButton(b)
+    make("UICorner", {CornerRadius = UDim.new(0, CONFIG.ButtonCornerRadius)}, b)
+    make("UIStroke", {
+        Color = BUTTON_OUTLINE, Thickness = 2, Transparency = 0,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+    }, b)
+    make("UIPadding", {PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12)}, b)
+end
 local function button(parent, text, callback)
     local b = make("TextButton", {
-        Size = UDim2.new(1, 0, 0, 30), BackgroundColor3 = Color3.fromRGB(104, 40, 54),
-        BorderSizePixel = 0, Text = text, TextSize = 12, TextWrapped = true,
-        Font = Enum.Font.GothamMedium, TextColor3 = Color3.new(1, 1, 1), LayoutOrder = #parent:GetChildren(),
+        Size = UDim2.new(1, 0, 0, CONFIG.ButtonHeight), BackgroundColor3 = BUTTON_BLACK,
+        BorderSizePixel = 0, Text = string.upper(text), TextSize = CONFIG.ButtonTextSize,
+        TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
+        FontFace = OSWALD_BOLD, TextColor3 = Color3.new(1, 1, 1),
+        LayoutOrder = #parent:GetChildren(), AutoButtonColor = true,
     }, parent)
-    make("UICorner", {CornerRadius = UDim.new(0, 4)}, b)
+    styleButton(b)
     connect(b.Activated, callback)
     return b
 end
@@ -217,8 +301,6 @@ for _, key in ipairs({"Player", "Yen", "Weapon", "Trait", "Height", "Flow", "Buf
 end
 local swatch = make("Frame", {Size = UDim2.new(1, 0, 0, 14), BackgroundColor3 = Color3.fromRGB(60, 60, 60), BorderSizePixel = 0, LayoutOrder = 20}, statusCard)
 make("UICorner", {CornerRadius = UDim.new(0, 4)}, swatch)
-local facePreview = make("ImageLabel", {Size = UDim2.fromOffset(50, 50), Image = "", Visible = false, BackgroundColor3 = Color3.fromRGB(202, 179, 152), BorderSizePixel = 0, LayoutOrder = 21}, statusCard)
-make("UICorner", {CornerRadius = UDim.new(0, 4)}, facePreview)
 local sessionCard = card(right, "SESSION")
 local status = label(sessionCard, "Idle. Choose a target, then Start.", 58)
 local pingLabel = label(sessionCard, "Ping: loading...", 30)
@@ -228,10 +310,11 @@ local function setStatus(text) if not closed then status.Text = text end end
 -- Searchable dropdown shared by all target fields; rendered above both columns.
 local dropdownState
 local shade = make("TextButton", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "", Visible = false, ZIndex = 40}, root)
-local popup = make("Frame", {Size = UDim2.fromOffset(280, 250), BackgroundColor3 = Color3.fromRGB(22, 25, 36), BorderSizePixel = 0, Visible = false, ZIndex = 50}, root)
+local popup = make("Frame", {Size = UDim2.fromOffset(280, 250), BackgroundColor3 = Color3.fromRGB(18, 42, 85), BorderSizePixel = 0, Visible = false, ZIndex = 50}, root)
 make("UICorner", {CornerRadius = UDim.new(0, 4)}, popup)
-local search = make("TextBox", {Position = UDim2.fromOffset(8, 8), Size = UDim2.new(1, -16, 0, 30), Text = "", PlaceholderText = "Search...", ClearTextOnFocus = false, TextSize = 13, Font = Enum.Font.Gotham, TextColor3 = Color3.new(1, 1, 1), BackgroundColor3 = Color3.fromRGB(40, 44, 58), BorderSizePixel = 0}, popup)
-local choices = make("ScrollingFrame", {Position = UDim2.fromOffset(8, 44), Size = UDim2.new(1, -16, 1, -52), BackgroundTransparency = 1, BorderSizePixel = 0, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollBarThickness = 3}, popup)
+local search = make("TextBox", {Position = UDim2.fromOffset(8, 8), Size = UDim2.new(1, -16, 0, 34), Text = "", PlaceholderText = "SEARCH...", ClearTextOnFocus = false, TextSize = 18, FontFace = OSWALD_BOLD, TextColor3 = Color3.new(1, 1, 1), BackgroundColor3 = BUTTON_BLACK, BorderSizePixel = 0}, popup)
+make("UICorner", {CornerRadius = UDim.new(0, 6)}, search)
+local choices = make("ScrollingFrame", {Position = UDim2.fromOffset(8, 48), Size = UDim2.new(1, -16, 1, -56), BackgroundTransparency = 1, BorderSizePixel = 0, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollBarThickness = 3}, popup)
 make("UIListLayout", {Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder}, choices)
 local function closeDropdown()
     dropdownState = nil
@@ -249,7 +332,8 @@ local function renderChoices()
     for _, item in ipairs(dropdownState.items) do
         if string.find(string.lower(item.label), query, 1, true) then
             count = count + 1
-            local b = make("TextButton", {Size = UDim2.new(1, -5, 0, 28), BackgroundColor3 = Color3.fromRGB(45, 35, 49), BorderSizePixel = 0, Text = item.label, TextSize = 12, TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.Gotham, LayoutOrder = count}, choices)
+            local b = make("TextButton", {Size = UDim2.new(1, -5, 0, 32), BackgroundColor3 = BUTTON_BLACK, BorderSizePixel = 0, Text = string.upper(item.label), TextSize = 18, TextColor3 = Color3.new(1, 1, 1), TextXAlignment = Enum.TextXAlignment.Left, FontFace = OSWALD_BOLD, LayoutOrder = count}, choices)
+            styleButton(b)
             table.insert(choiceConnections, b.Activated:Connect(function()
                 local state = dropdownState
                 if not state then return end
@@ -286,7 +370,7 @@ local function selection(parent, caption, getItems, onSelect, defaultValue)
     b = button(parent, defaultValue or "Choose target...", function()
         openDropdown(b, getItems(), function(value, display)
             selected, selectedLabel = value, display
-            b.Text = display
+            b.Text = string.upper(display)
             if onSelect then onSelect(value) end
         end)
     end)
@@ -295,7 +379,7 @@ local function selection(parent, caption, getItems, onSelect, defaultValue)
         label = function() return selectedLabel end,
         set = function(value, display)
             selected, selectedLabel = value, display or tostring(value)
-            b.Text = value ~= nil and selectedLabel or "Choose target..."
+            b.Text = value ~= nil and string.upper(selectedLabel) or "CHOOSE TARGET..."
         end,
     }
 end
@@ -303,9 +387,9 @@ local function numericInput(parent, caption, defaultValue, minimum, maximum)
     label(parent, caption, 22)
     local value = defaultValue
     local box = make("TextBox", {
-        Size = UDim2.new(1, 0, 0, 29), Text = tostring(defaultValue), ClearTextOnFocus = false,
-        BackgroundColor3 = Color3.fromRGB(35, 38, 51), BorderSizePixel = 0, TextSize = 13,
-        Font = Enum.Font.Gotham, TextColor3 = Color3.new(1, 1, 1), LayoutOrder = #parent:GetChildren(),
+        Size = UDim2.new(1, 0, 0, 30), Text = tostring(defaultValue), ClearTextOnFocus = false,
+        BackgroundColor3 = BUTTON_BLACK, BorderSizePixel = 0, TextSize = 18,
+        FontFace = OSWALD_BOLD, TextColor3 = Color3.new(1, 1, 1), LayoutOrder = #parent:GetChildren(),
     }, parent)
     make("UICorner", {CornerRadius = UDim.new(0, 4)}, box)
     local function commit()
@@ -1140,8 +1224,6 @@ local function refreshBuild()
     live.Buff.Text = "Buff: " .. tostring(build.buffName or "Loading...")
     live.Percent.Text = "Buff %: " .. (build.Buff and string.format("%.1f%%", build.Buff) or "Loading...")
     live.Face.Text = "Face: " .. (build.Face or (build.faceTexture and "Asset " .. build.faceTexture or "Loading..."))
-    facePreview.Visible = build.faceTexture ~= nil and build.faceTexture ~= ""
-    if facePreview.Visible then facePreview.Image = build.faceTexture:match("^%d+$") and "rbxassetid://" .. build.faceTexture or build.faceTexture end
     if build.Color then
         local r, g, b = math.floor(build.Color[1] + 0.5), math.floor(build.Color[2] + 0.5), math.floor(build.Color[3] + 0.5)
         live.Color.Text = string.format("Color: #%02X%02X%02X\nRGB %d, %d, %d", r, g, b, r, g, b)
@@ -1154,29 +1236,17 @@ local function refreshBuild()
         pingLabel.Text = string.format("Ping: %.0f ms%s | minimum delay %.3f s", ping, available and "" or " (fallback)", ping / 1000 + 0.02)
     end
 end
--- Background loading never sends any reroll requests.
-local previewUsed, currentImage = false, nil
-local loadBackground
-local function fallbackBackground()
-    if closed or previewUsed or background.IsLoaded then return end
-    previewUsed = true
-    loadBackground(CONFIG.PreviewId)
-end
-loadBackground = function(uri)
-    currentImage = uri
-    background.Image = uri
-    task.spawn(function()
-        local ok = pcall(function()
-            ContentProvider:PreloadAsync({background}, function(_, state)
-                if closed or currentImage ~= uri then return end
-                if state == Enum.AssetFetchStatus.Failure or state == Enum.AssetFetchStatus.TimedOut then fallbackBackground() end
-            end)
+-- Load the supplied texture without blocking startup or spinning.
+task.spawn(function()
+    local ok, err = pcall(function()
+        ContentProvider:PreloadAsync({background}, function(_, state)
+            if not closed and (state == Enum.AssetFetchStatus.Failure or state == Enum.AssetFetchStatus.TimedOut) then
+                warn("LOCKED GUI texture 114239702819151 could not load: " .. tostring(state))
+            end
         end)
-        if not ok and not closed and currentImage == uri then fallbackBackground() end
     end)
-    task.delay(15, function() if not closed and currentImage == uri then fallbackBackground() end end)
-end
-loadBackground(CONFIG.ImageId)
+    if not ok and not closed then warn("LOCKED GUI texture: " .. tostring(err)) end
+end)
 task.spawn(function()
     while not closed do
         local ok, err = pcall(refreshBuild)
