@@ -1,12 +1,52 @@
--- Run this entire executor script, including the embedded source.
--- Angular blue GUI, fixed-scale texture 114239702819151, and compact Oswald Bold buttons.
+-- LOCKED Comic GUI: run ONLY this script. K menu | P unload | 1-6 categories.
+-- PNG upload mapping and editable sizes are at the top of the source below.
 local source = [====[
 -- LOCKED build viewer + reroll, slot, and emote controls.
--- LocalScript in StarterPlayer > StarterPlayerScripts. P unloads.
+-- Client runtime. K toggles the character menu; P unloads.
 -- Rerolls spend yen. The keybind request is sent before a non-color yen-floor
 -- rejoin; a client script cannot confirm a rollback or force server persistence.
 -- Slot/emote results depend on the game's server handlers.
 local SCRIPT_SOURCE, RESUME_JSON = ...
+-- Upload PNGs from this ZIP's assets folder; paste their IMAGE IDs below.
+-- Keep your original four IDs. The other eleven are NEW uploads.
+-- Existing IDs are recovered from the running version whenever possible.
+local ASSET_IDS = {
+    RibbonMask = 130993713145417, -- assets/ribbon_mask.png
+    AccentSlash = 124307481803098, -- assets/accent_slash.png
+    RibbonGlow = 96226773706482, -- assets/ribbon_glow.png
+    PanelTexture = 73637069902156, -- assets/panel_texture.png
+    PanelBody = 86321867243583, -- assets/panel_body.png
+    PanelFrame = 132432993644207, -- assets/panel_frame.png
+    CategoryHeader = 71436561099673, -- assets/category_header.png
+    ButtonPlate = 105817330384348, -- assets/button_plate.png
+    ButtonEdge = 97749155301683, -- assets/button_edge.png
+    SelectedMarker = 109463840811072, -- assets/selected_marker.png
+    LaunchRibbon = 119284764895914, -- assets/launch_ribbon.png
+    LaunchStreaks = 75600631281401, -- assets/launch_streaks.png
+    ImpactBurst = 138339687387827, -- assets/impact_burst.png
+    PanelGrain = 103918578845044, -- assets/panel_grain.png
+    CategorySymbols = 70785419966031, -- assets/category_symbols.png
+}
+local MENU = {
+    Width = 920, Height = 560,
+    Scale = 0.66, MinScale = 0.18, PanelScale = 0.82,
+    WorldWidth = 22, ScaleFollowSpeed = 16,
+    VerticalOffset = 0.3, MaxDistance = 100,
+    ToggleKey = Enum.KeyCode.K, Shortcuts = true,
+    ClickTransition = true,
+    TransitionSeconds = 0.46, -- Entire diagonal banner animation. Set ClickTransition=false to skip.
+}
+local function assetUri(id)
+    if type(id) == "number" and id > 0 then return "rbxassetid://" .. tostring(math.floor(id)) end
+    if type(id) == "string" then
+        local n = id:match("^rbxassetid://(%d+)$") or id:match("^(%d+)$") or id:match("[?&]id=(%d+)")
+        if n and tonumber(n) > 0 then return "rbxassetid://" .. n end
+    end
+    return ""
+end
+local menuGui
+local menuCategory, menuVisible = nil, true
+local lastKnownYen
 local HttpService = game:GetService("HttpService")
 local executorEnv = type(getgenv) == "function" and getgenv() or _G
 local restored
@@ -15,8 +55,41 @@ if type(RESUME_JSON) == "string" then
     if ok and type(state) == "table" then restored = state end
 end
 local previous = executorEnv.__LOCKEDBuildRoller
+-- Keep explicitly supplied IDs; otherwise recover the IDs already loaded by
+-- the previous version before its UI is destroyed. Teleport state retains them.
+local function takeAssetIds(candidate)
+    if type(candidate) ~= "table" then return end
+    for key in pairs(ASSET_IDS) do
+        if assetUri(ASSET_IDS[key]) == "" and assetUri(candidate[key]) ~= "" then ASSET_IDS[key] = candidate[key] end
+    end
+end
+takeAssetIds(restored and restored.assets)
+takeAssetIds(executorEnv.__LOCKEDRibbonAssetIds)
+if type(previous) == "table" then
+    takeAssetIds(previous.assetIds)
+    local names = {
+        ComicPlate = "RibbonMask", BlueSlash = "AccentSlash", BlueGlow = "RibbonGlow", GrayscaleTexture = "PanelTexture",
+        CrispPanelInk = "PanelBody", CrispPanelFrame = "PanelFrame", CrispTitleBar = "CategoryHeader",
+        ButtonPlate = "ButtonPlate", ButtonEdge = "ButtonEdge", SelectedMarker = "SelectedMarker",
+        LaunchRibbon = "LaunchRibbon", LaunchStreaks = "LaunchStreaks", SelectionImpact = "ImpactBurst",
+        PanelGrain = "PanelGrain", CategorySymbol = "CategorySymbols",
+    }
+    for _, field in ipairs({"worldMenu", "worldPanel"}) do
+        pcall(function()
+            local container = previous[field]
+            if container then
+                for _, item in ipairs(container:GetDescendants()) do
+                    local key = names[item.Name]
+                    if key and (key ~= "PanelBody" or (previous.uiVersion or 0) >= 3) and item:IsA("ImageLabel") and assetUri(ASSET_IDS[key]) == "" and assetUri(item.Image) ~= "" then ASSET_IDS[key] = item.Image end
+                end
+            end
+        end)
+    end
+end
+executorEnv.__LOCKEDRibbonAssetIds = ASSET_IDS
 if type(previous) == "table" and type(previous.unload) == "function" then pcall(previous.unload) end
-local session = {}
+local UI_VERSION = 3
+local session = {assetIds = ASSET_IDS, uiVersion = UI_VERSION}
 executorEnv.__LOCKEDBuildRoller = session
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
@@ -25,6 +98,7 @@ local Stats = game:GetService("Stats")
 local TeleportService = game:GetService("TeleportService")
 local ContentProvider = game:GetService("ContentProvider")
 local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
 local player = Players.LocalPlayer
 -- No game.Loaded, character, or asset wait before creating the controls.
 while not player do task.wait(0.01); player = Players.LocalPlayer end
@@ -34,32 +108,33 @@ while not playerGui do task.wait(0.01); playerGui = player:FindFirstChildOfClass
 local CONFIG = {
     -- Window dimensions in pixels; width and height resize independently.
     DefaultWidth = 600,
-    DefaultHeight = 640,
-    MinWidth = 360,
-    MinHeight = 280,
-    MaxWidth = 1000,
-    MaxHeight = 1000,
+    DefaultHeight = 580,
+    MinWidth = 420,
+    MinHeight = 360,
+    MaxWidth = 900,
+    MaxHeight = 850,
     CornerRadius = 0,
     PanelOutline = 5,
     TopLeftCut = 34, TopRightCut = 14,
     BottomLeftCut = 14, BottomRightCut = 34,
-    TextureImageId = "rbxassetid://114239702819151",
-    TextureWidth = 1000, TextureHeight = 1000, -- Fixed pixels per texture tile.
-    TextureTransparency = 0.75, -- 0 = strongest pattern; 1 = invisible.
-    BackgroundRGB = {68, 133, 227},
-    ButtonHeight = 36, ButtonTextSize = 18, ButtonCornerRadius = 2,
+    TextureImageId = assetUri(ASSET_IDS.PanelTexture),
+    TextureWidth = 128, TextureHeight = 128, -- Fixed pixels per halftone tile.
+    TextureTransparency = 0.88, -- 0 = strongest pattern; 1 = invisible.
+    BackgroundRGB = {8, 10, 16},
+    ButtonHeight = 34, ButtonTextSize = 19, ButtonCornerRadius = 0,
     ResponseTimeout = 8, SameResultGrace = 0.5, RejoinDelay = 2, MissingPingMilliseconds = 100,
     SlotTarget = "1", ResetWait = 10, SlotWait = 2, SlotTimeout = 15, ActionDelay = 0.1,
-    GuiDisplayOrder = 2147483647, RollbackWait = 0.2,
+    RollbackWait = 0.2,
     AutoResumeAfterRollback = true, ResumeYenTimeout = 15,
     CornerHitbox = 24,
 }
 if restored and type(restored.config) == "table" then
     for key, value in pairs(restored.config) do
-        if CONFIG[key] ~= nil and type(value) == type(CONFIG[key]) then CONFIG[key] = value end
+        local layout = key:find("Width") or key:find("Height") or key:find("Button") or key == "BackgroundRGB"
+        if key ~= "TextureImageId" and (not layout or restored.uiVersion == UI_VERSION) and CONFIG[key] ~= nil and type(value) == type(CONFIG[key]) then CONFIG[key] = value end
     end
 end
-local OSWALD_BOLD = Font.new("rbxasset://fonts/families/Oswald.json", Enum.FontWeight.Bold, Enum.FontStyle.Normal)
+local OSWALD_BOLD = Font.new("rbxasset://fonts/families/Bangers.json", Enum.FontWeight.Regular, Enum.FontStyle.Normal)
 local OSWALD_REGULAR = Font.new("rbxasset://fonts/families/Oswald.json", Enum.FontWeight.Regular, Enum.FontStyle.Normal)
 local BLUE = Color3.fromRGB(table.unpack(CONFIG.BackgroundRGB))
 local BUTTON_BLACK = Color3.fromRGB(14, 14, 14)
@@ -70,7 +145,7 @@ local REMOTE_NAMES = {
 }
 local FALLBACK_WEAPONS = {"Accelerate","Acrobatic","AceEater","Chigiri","CopyCat","DirectShot","Emperor","Formless","GodSpeed","IronHead","King","Kunigami","Leader","LongLegs","Monster","Nagi","Neurotic","Planetary","Repel","Riptide","Rough","Serpent","Shadow","Snatch","SwordScrew","Updraft","Voracious","WatchTower","Web"}
 local FALLBACK_TRAITS = {"Ambidextrous","Athlete","Bunnys","Calculate","Clamps","Claw","Consistent","Destruction","Diver","Dragon","Egoist","Fortune","GoldenZone","LongStrides","Metavision","NoLook","Powerhouse","Puppeteer","QuickDraw","Revolver","Ripper","Surf","Tank","Tireless","TwinGuns","Unbreakable"}
-for _, name in ipairs({"LOCKED_Build_Auto_Roller", "LOCKED_Build_Viewer", "ResizableImageViewer"}) do
+for _, name in ipairs({"LOCKED_Build_Auto_Roller", "LOCKED_Character_Ribbons", "LOCKED_Build_Viewer", "ResizableImageViewer"}) do
     local old = playerGui:FindFirstChild(name)
     if old then old:Destroy() end
 end
@@ -80,14 +155,21 @@ local function make(class, props, parent)
     obj.Parent = parent
     return obj
 end
-local gui = make("ScreenGui", {
+local gui = make("BillboardGui", {
     Name = "LOCKED_Build_Auto_Roller", ResetOnSpawn = false,
-    DisplayOrder = CONFIG.GuiDisplayOrder, Enabled = true,
-    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+    Size = UDim2.fromOffset(CONFIG.DefaultWidth + 48, CONFIG.DefaultHeight + 48),
+    StudsOffset = Vector3.new(0, MENU.VerticalOffset, 0),
+    AlwaysOnTop = true, LightInfluence = 0, Active = true,
+    ClipsDescendants = false, MaxDistance = MENU.MaxDistance,
+    Enabled = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 }, playerGui)
-local root = make("Frame", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0, Visible = true}, gui)
+local root = make("Frame", {
+    Size = UDim2.fromOffset(CONFIG.DefaultWidth + 48, CONFIG.DefaultHeight + 48),
+    BackgroundTransparency = 1, BorderSizePixel = 0, Visible = false,
+}, gui)
+local detailScale = make("UIScale", {Scale = 1}, root)
 local window = make("CanvasGroup", {
-    Name = "BuildWindow", Position = UDim2.fromOffset(30, 35),
+    Name = "BuildWindow", Position = UDim2.fromOffset(24, 24),
     Size = UDim2.fromOffset(
         math.clamp(CONFIG.DefaultWidth, CONFIG.MinWidth, CONFIG.MaxWidth),
         math.clamp(CONFIG.DefaultHeight, CONFIG.MinHeight, CONFIG.MaxHeight)
@@ -96,142 +178,82 @@ local window = make("CanvasGroup", {
     BorderSizePixel = 0, ClipsDescendants = true,
     Visible = true, GroupTransparency = 0,
 }, root)
--- True cut-corner silhouette. Thin clipped bands form the diagonals without
--- covering the missing corners with black rectangles. Texture coordinates stay
--- anchored to the window, so neither the pattern nor its scale jumps on resize.
-local panelBands = {}
-local function panelBand(index)
-    local band = panelBands[index]
-    if band then return band end
-    local outer = make("Frame", {
-        Name = "AngularOutline" .. index, BackgroundColor3 = Color3.new(0, 0, 0),
-        BorderSizePixel = 0, Active = false, ZIndex = 1,
-    }, window)
-    local inner = make("Frame", {
-        Name = "BlueSurface", BackgroundColor3 = BLUE, BorderSizePixel = 0,
-        ClipsDescendants = true, Active = false, ZIndex = 1,
-    }, outer)
-    local texture = make("ImageLabel", {
-        Name = "GrayscaleTexture", BackgroundTransparency = 1, BorderSizePixel = 0,
-        Size = UDim2.fromOffset(math.max(CONFIG.MaxWidth, CONFIG.TextureWidth), math.max(CONFIG.MaxHeight, CONFIG.TextureHeight)),
-        Image = CONFIG.TextureImageId, ImageColor3 = Color3.fromRGB(26, 76, 160),
-        ImageTransparency = CONFIG.TextureTransparency, ScaleType = Enum.ScaleType.Tile,
-        TileSize = UDim2.fromOffset(CONFIG.TextureWidth, CONFIG.TextureHeight),
-        Active = false, ZIndex = 1,
-    }, inner)
-    band = {outer = outer, inner = inner, texture = texture}
-    panelBands[index] = band
-    return band
-end
-local function updatePanelShape()
-    local w, h = window.AbsoluteSize.X, window.AbsoluteSize.Y
-    if w <= 0 or h <= 0 then w, h = window.Size.X.Offset, window.Size.Y.Offset end
-    w, h = math.floor(w), math.floor(h)
-    if w <= 0 or h <= 0 then return end
-    local function cut(amount) return math.floor(math.clamp(amount, 0, math.min(w, h) * 0.25)) end
-    local tl, tr = cut(CONFIG.TopLeftCut), cut(CONFIG.TopRightCut)
-    local bl, br = cut(CONFIG.BottomLeftCut), cut(CONFIG.BottomRightCut)
-    local border = math.clamp(CONFIG.PanelOutline, 1, math.min(w, h) * 0.1)
-    local diagonalBorder = border * math.sqrt(2)
-    local topRows = math.ceil(math.max(math.max(tl, tr) + diagonalBorder - border + 1, border + 1))
-    local bottomRows = math.ceil(math.max(math.max(bl, br) + diagonalBorder - border + 1, border + 1))
-    local used = 0
-    local function drawBand(y, height)
-        used = used + 1
-        local band = panelBand(used)
-        local sampleY = y + 0.5
-        local left = math.max(0, tl - sampleY, bl - (h - sampleY))
-        local right = w - math.max(0, tr - sampleY, br - (h - sampleY))
-        local x = math.floor(left)
-        band.outer.Position = UDim2.fromOffset(x, y)
-        band.outer.Size = UDim2.fromOffset(math.ceil(right) - x, height)
-        band.outer.Visible = true
-        local blueLeft = math.ceil(math.max(border, tl - sampleY + diagonalBorder, bl - (h - sampleY) + diagonalBorder))
-        local blueRight = math.floor(w - math.max(border, tr - sampleY + diagonalBorder, br - (h - sampleY) + diagonalBorder))
-        local blueY = math.max(y, math.ceil(border))
-        local blueEnd = math.min(y + height, h - math.ceil(border))
-        band.inner.Visible = blueRight > blueLeft and blueEnd > blueY
-        if band.inner.Visible then
-            band.inner.Position = UDim2.fromOffset(blueLeft - x, blueY - y)
-            band.inner.Size = UDim2.fromOffset(blueRight - blueLeft, blueEnd - blueY)
-            band.texture.Position = UDim2.fromOffset(-blueLeft, -blueY)
-        end
-    end
-    -- Put the large center band first; the preload target remains this texture.
-    drawBand(topRows, h - topRows - bottomRows)
-    for y = 0, topRows - 1 do drawBand(y, 1) end
-    for y = h - bottomRows, h - 1 do drawBand(y, 1) end
-    for i = used + 1, #panelBands do panelBands[i].outer.Visible = false end
-end
-updatePanelShape()
-local background = panelBands[1].texture
+-- Dedicated panel assets: the expanded controls share the menu's comic style.
+local panelGlow = make("ImageLabel", {
+    Name = "CrispPanelGlow", Position = UDim2.fromOffset(-18, -18), Size = UDim2.new(1, 36, 1, 36),
+    BackgroundTransparency = 1, Image = assetUri(ASSET_IDS.RibbonGlow),
+    ImageColor3 = Color3.fromRGB(34, 139, 255), ImageTransparency = 0.79, ZIndex = 0,
+}, window)
+local panelNative = make("Frame", {
+    Name = "CrispPanelFallback", Position = UDim2.fromOffset(16, 14), Size = UDim2.new(1, -32, 1, -28),
+    BackgroundColor3 = BUTTON_BLACK, BorderSizePixel = 0, ZIndex = 1,
+}, window)
+make("UIStroke", {Color = Color3.fromRGB(34, 139, 255), Thickness = 2, Transparency = 0.2}, panelNative)
+local panelInk = make("ImageLabel", {
+    Name = "CrispPanelInk", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
+    Image = assetUri(ASSET_IDS.PanelBody), ZIndex = 2,
+}, window)
+make("ImageLabel", {
+    Name = "CrispPanelFrame", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
+    Image = assetUri(ASSET_IDS.PanelFrame), ZIndex = 3,
+}, window)
+make("ImageLabel", {
+    Name = "PanelGrain", Position = UDim2.fromOffset(30, 78), Size = UDim2.new(1, -60, 1, -124),
+    BackgroundTransparency = 1, Image = assetUri(ASSET_IDS.PanelGrain), ImageTransparency = 0.85,
+    ScaleType = Enum.ScaleType.Tile, TileSize = UDim2.fromOffset(128, 128), ZIndex = 3,
+}, window)
+local panelTitlePlate = make("ImageLabel", {
+    Name = "CrispTitleBar", Position = UDim2.fromOffset(18, 10), Size = UDim2.new(1, -36, 0, 70),
+    BackgroundTransparency = 1, Image = assetUri(ASSET_IDS.CategoryHeader), ZIndex = 4,
+}, window)
+local panelTitleFallback = make("Frame", {
+    Name = "HeaderFallback", Position = UDim2.fromOffset(9, 10), Size = UDim2.new(1, -18, 1, -20),
+    BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, ZIndex = 4,
+}, panelTitlePlate)
+local panelSymbol = make("ImageLabel", {
+    Name = "CategorySymbol", Position = UDim2.fromOffset(88, 13), Size = UDim2.fromOffset(33, 33),
+    BackgroundTransparency = 1, Image = assetUri(ASSET_IDS.CategorySymbols), ImageColor3 = BUTTON_BLACK,
+    ImageRectSize = Vector2.new(128, 128), ImageRectOffset = Vector2.new(0, 0), ZIndex = 6,
+}, panelTitlePlate)
+local panelCategoryTitle = make("TextLabel", {
+    Name = "CategoryTitle", Position = UDim2.fromOffset(128, 4), Size = UDim2.new(1, -160, 1, -15),
+    BackgroundTransparency = 1, Text = "BUILD", FontFace = OSWALD_BOLD, TextSize = 34,
+    TextColor3 = BUTTON_BLACK, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 6,
+}, panelTitlePlate)
+local buildBrief = make("TextLabel", {
+    Name = "BuildBrief", Position = UDim2.fromOffset(28, 102), Size = UDim2.new(1, -56, 0, 23),
+    BackgroundTransparency = 1, Text = "READING YOUR BUILD...", FontFace = OSWALD_REGULAR, TextSize = 15,
+    TextColor3 = Color3.fromRGB(175, 205, 233), TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 6,
+}, window)
 local connections, closed = {}, false
-local loweredScreens, watchedScreens = {}, {}
 local activeJob, teleporting, pendingRollback
 local function connect(signal, callback)
     local c = signal:Connect(callback)
     table.insert(connections, c)
     return c
 end
-connect(window:GetPropertyChangedSignal("AbsoluteSize"), updatePanelShape)
+local function syncPanelFallback() panelNative.Visible = panelInk.Image == "" or not panelInk.IsLoaded end
+connect(panelInk:GetPropertyChangedSignal("IsLoaded"), syncPanelFallback)
+syncPanelFallback()
+local function syncHeaderFallback() panelTitleFallback.Visible = panelTitlePlate.Image == "" or not panelTitlePlate.IsLoaded end
+connect(panelTitlePlate:GetPropertyChangedSignal("IsLoaded"), syncHeaderFallback); syncHeaderFallback()
 local function cleanup()
     if closed then return end
     closed = true
     pendingRollback = false
+    if menuGui and menuGui.Parent then menuGui:Destroy() end
     if activeJob then activeJob.cancelled = true end
     for _, c in ipairs(connections) do c:Disconnect() end
     table.clear(connections)
-    for screen, originalOrder in pairs(loweredScreens) do
-        pcall(function()
-            if screen.Parent and screen.DisplayOrder == CONFIG.GuiDisplayOrder - 1 then
-                screen.DisplayOrder = originalOrder
-            end
-        end)
-    end
-    table.clear(loweredScreens)
-    table.clear(watchedScreens)
 end
 connect(gui.Destroying, cleanup)
 local function unload() cleanup(); gui:Destroy() end
 session.unload = unload
 
--- Stay above PlayerGui game overlays, including ones created on respawn.
--- Roblox CoreGui, system dialogs, and teleport screens are separate layers.
-local function enforceViewerLayer()
-    if closed then return end
-    if gui.DisplayOrder ~= CONFIG.GuiDisplayOrder then gui.DisplayOrder = CONFIG.GuiDisplayOrder end
-    if not gui.Enabled then gui.Enabled = true end
-    if gui.ResetOnSpawn then gui.ResetOnSpawn = false end
-    if not root.Visible then root.Visible = true end
-    if not window.Visible then window.Visible = true end
-    if window.GroupTransparency ~= 0 then window.GroupTransparency = 0 end
-end
-for _, property in ipairs({"DisplayOrder", "Enabled", "ResetOnSpawn"}) do
-    connect(gui:GetPropertyChangedSignal(property), enforceViewerLayer)
-end
-connect(root:GetPropertyChangedSignal("Visible"), enforceViewerLayer)
-connect(window:GetPropertyChangedSignal("Visible"), enforceViewerLayer)
-connect(window:GetPropertyChangedSignal("GroupTransparency"), enforceViewerLayer)
-local function watchGameScreen(screen)
-    if closed or screen == gui or not screen:IsA("ScreenGui") or watchedScreens[screen] then return end
-    watchedScreens[screen] = true
-    local function keepBelowViewer()
-        if closed or not screen:IsDescendantOf(playerGui) then return end
-        if screen.DisplayOrder >= CONFIG.GuiDisplayOrder then
-            if loweredScreens[screen] == nil then loweredScreens[screen] = screen.DisplayOrder end
-            screen.DisplayOrder = CONFIG.GuiDisplayOrder - 1
-        end
-        enforceViewerLayer()
-    end
-    connect(screen:GetPropertyChangedSignal("DisplayOrder"), keepBelowViewer)
-    keepBelowViewer()
-end
-connect(playerGui.DescendantAdded, watchGameScreen)
-for _, screen in ipairs(playerGui:GetDescendants()) do watchGameScreen(screen) end
-enforceViewerLayer()
 local yenBanner = make("TextLabel", {
-    Name = "CurrentYen", Position = UDim2.fromOffset(40, 10),
-    Size = UDim2.new(1, -80, 0, 24), BackgroundTransparency = 1,
+    Name = "CurrentYen", Position = UDim2.fromOffset(28, 78),
+    Size = UDim2.new(1, -52, 0, 24), BackgroundTransparency = 1,
     Text = "Current yen: loading...", TextSize = 20, FontFace = OSWALD_BOLD,
     TextColor3 = Color3.fromRGB(255, 255, 255), TextXAlignment = Enum.TextXAlignment.Left,
     ZIndex = 10,
@@ -239,7 +261,7 @@ local yenBanner = make("TextLabel", {
 
 local function column(name, xScale, xOffset)
     local scroll = make("ScrollingFrame", {
-        Name = name, Position = UDim2.new(xScale, xOffset, 0, 44), Size = UDim2.new(0.5, -18, 1, -88),
+        Name = name, Position = UDim2.new(xScale, xOffset, 0, 132), Size = UDim2.new(0.5, -34, 1, -190),
         BackgroundTransparency = 1, BorderSizePixel = 0, CanvasSize = UDim2.new(),
         AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollBarThickness = 3,
         ScrollBarImageColor3 = Color3.fromRGB(225, 237, 255), ZIndex = 5,
@@ -248,39 +270,86 @@ local function column(name, xScale, xOffset)
     make("UIPadding", {PaddingBottom = UDim.new(0, 8)}, scroll)
     return scroll
 end
-local left, right = column("LeftControls", 0, 12), column("RightControls", 0.5, 6)
+local left, right = column("LeftControls", 0, 24), column("RightControls", 0.5, 10)
 local order = 0
+local cardsByTitle = {}
 local function card(parent, title)
     order = order + 1
     local frame = make("Frame", {
         Name = title, Size = UDim2.new(1, -5, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
-        BackgroundTransparency = 1,
-        BorderSizePixel = 0, LayoutOrder = order,
+        BackgroundTransparency = 1, BorderSizePixel = 0, LayoutOrder = order,
     }, parent)
-    make("UIPadding", {PaddingLeft = UDim.new(0, 9), PaddingRight = UDim.new(0, 9), PaddingTop = UDim.new(0, 9), PaddingBottom = UDim.new(0, 9)}, frame)
+    make("UIPadding", {PaddingLeft = UDim.new(0, 7), PaddingRight = UDim.new(0, 7), PaddingTop = UDim.new(0, 7), PaddingBottom = UDim.new(0, 9)}, frame)
     make("UIListLayout", {Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder}, frame)
+    local heading = make("Frame", {Name = "ComicHeading", Size = UDim2.new(1, 0, 0, 29), BackgroundTransparency = 1, LayoutOrder = 0}, frame)
+    local fallback = make("Frame", {Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0}, heading)
+    local plate = make("ImageLabel", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Image = assetUri(ASSET_IDS.CategoryHeader), ImageColor3 = Color3.new(1, 1, 1), ZIndex = 2}, heading)
+    make("ImageLabel", {Name = "GrayscaleTexture", Position = UDim2.new(0.68, 0, 0.1, 0), Size = UDim2.new(0.28, 0, 0.7, 0), BackgroundTransparency = 1, Image = assetUri(ASSET_IDS.PanelTexture), ImageColor3 = BUTTON_BLACK, ImageTransparency = 0.82, ScaleType = Enum.ScaleType.Tile, TileSize = UDim2.fromOffset(64, 64), ZIndex = 3}, heading)
+    local function sync() fallback.Visible = plate.Image == "" or not plate.IsLoaded end
+    connect(plate:GetPropertyChangedSignal("IsLoaded"), sync); sync()
     make("TextLabel", {
-        Size = UDim2.new(1, 0, 0, 22), BackgroundTransparency = 1, Text = title,
-        TextColor3 = Color3.fromRGB(255, 255, 255), TextSize = 18,
-        FontFace = OSWALD_BOLD, TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = 0,
-    }, frame)
+        Position = UDim2.fromOffset(11, 0), Size = UDim2.new(1, -18, 1, 0),
+        BackgroundTransparency = 1, Text = title, TextColor3 = BUTTON_BLACK, TextSize = 20,
+        FontFace = OSWALD_BOLD, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 4,
+    }, heading)
+    cardsByTitle[title] = frame
     return frame
 end
 local function label(parent, text, height)
     return make("TextLabel", {
         Size = UDim2.new(1, 0, 0, height or 28), BackgroundTransparency = 1,
-        Text = text, TextWrapped = true, TextSize = 15, FontFace = OSWALD_REGULAR,
+        Text = text, TextWrapped = true, TextSize = 16, FontFace = OSWALD_REGULAR,
         TextColor3 = Color3.fromRGB(231, 235, 246), TextXAlignment = Enum.TextXAlignment.Left,
         LayoutOrder = #parent:GetChildren(),
     }, parent)
 end
 local function styleButton(b)
-    make("UICorner", {CornerRadius = UDim.new(0, CONFIG.ButtonCornerRadius)}, b)
-    make("UIStroke", {
-        Color = BUTTON_OUTLINE, Thickness = 2, Transparency = 0,
-        ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+    b.BackgroundTransparency, b.TextTransparency, b.AutoButtonColor = 1, 1, false
+    local fallback = make("Frame", {
+        Name = "ButtonFallback", Position = UDim2.fromOffset(1, 2), Size = UDim2.new(1, -2, 1, -3),
+        BackgroundColor3 = BUTTON_BLACK, BorderSizePixel = 0, ZIndex = 1,
     }, b)
-    make("UIPadding", {PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12)}, b)
+    local fallbackStroke = make("UIStroke", {Color = Color3.fromRGB(34, 139, 255), Thickness = 1, Transparency = 0.25}, fallback)
+    local plate = make("ImageLabel", {
+        Name = "ButtonPlate", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
+        Image = assetUri(ASSET_IDS.ButtonPlate), ImageColor3 = BUTTON_BLACK, ZIndex = 2,
+    }, b)
+    local edge = make("ImageLabel", {
+        Name = "ButtonEdge", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
+        Image = assetUri(ASSET_IDS.ButtonEdge), ImageColor3 = Color3.fromRGB(34, 139, 255), ZIndex = 3,
+    }, b)
+    local marker = make("ImageLabel", {
+        Name = "SelectedMarker", Position = UDim2.new(1, -28, 0.5, -9), Size = UDim2.fromOffset(18, 18),
+        BackgroundTransparency = 1, Image = assetUri(ASSET_IDS.SelectedMarker), ImageColor3 = BUTTON_BLACK,
+        Visible = false, ZIndex = 4,
+    }, b)
+    local text = make("TextLabel", {
+        Name = "ComicButtonText", Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -39, 1, 0),
+        BackgroundTransparency = 1, Text = b.Text, FontFace = b.FontFace, TextSize = b.TextSize,
+        TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = Color3.new(1, 1, 1), ZIndex = 4,
+    }, b)
+    local hovered = false
+    local function sync()
+        fallback.Visible = plate.Image == "" or not plate.IsLoaded
+        local selected = b.BackgroundColor3.B > 0.5
+        local fill = hovered and Color3.new(1, 1, 1) or b.BackgroundColor3
+        local labelInk = hovered or selected
+        plate.ImageColor3, fallback.BackgroundColor3 = fill, fill
+        edge.ImageColor3 = hovered and BUTTON_BLACK or (selected and Color3.new(1, 1, 1) or Color3.fromRGB(34, 139, 255))
+        fallbackStroke.Color = edge.ImageColor3
+        marker.Visible = selected
+        text.Text, text.TextSize = b.Text, b.TextSize
+        text.TextColor3 = labelInk and BUTTON_BLACK or Color3.new(1, 1, 1)
+    end
+    connect(plate:GetPropertyChangedSignal("IsLoaded"), sync)
+    connect(b:GetPropertyChangedSignal("Text"), sync)
+    connect(b:GetPropertyChangedSignal("BackgroundColor3"), sync)
+    connect(b:GetPropertyChangedSignal("TextSize"), sync)
+    connect(b.MouseEnter, function() hovered = true; sync() end)
+    connect(b.MouseLeave, function() hovered = false; sync() end)
+    connect(b.SelectionGained, function() hovered = true; sync() end)
+    connect(b.SelectionLost, function() hovered = false; sync() end)
+    sync()
 end
 local function button(parent, text, callback)
     local b = make("TextButton", {
@@ -310,10 +379,10 @@ local function setStatus(text) if not closed then status.Text = text end end
 -- Searchable dropdown shared by all target fields; rendered above both columns.
 local dropdownState
 local shade = make("TextButton", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "", Visible = false, ZIndex = 40}, root)
-local popup = make("Frame", {Size = UDim2.fromOffset(280, 250), BackgroundColor3 = Color3.fromRGB(18, 42, 85), BorderSizePixel = 0, Visible = false, ZIndex = 50}, root)
-make("UICorner", {CornerRadius = UDim.new(0, 4)}, popup)
+local popup = make("Frame", {Size = UDim2.fromOffset(280, 250), BackgroundColor3 = BUTTON_BLACK, BorderSizePixel = 0, Visible = false, ZIndex = 50}, root)
+make("UIStroke", {Color = Color3.fromRGB(34, 139, 255), Thickness = 2, ApplyStrokeMode = Enum.ApplyStrokeMode.Border}, popup)
 local search = make("TextBox", {Position = UDim2.fromOffset(8, 8), Size = UDim2.new(1, -16, 0, 34), Text = "", PlaceholderText = "SEARCH...", ClearTextOnFocus = false, TextSize = 18, FontFace = OSWALD_BOLD, TextColor3 = Color3.new(1, 1, 1), BackgroundColor3 = BUTTON_BLACK, BorderSizePixel = 0}, popup)
-make("UICorner", {CornerRadius = UDim.new(0, 6)}, search)
+make("UIStroke", {Color = Color3.fromRGB(255, 255, 255), Thickness = 1.5, Transparency = 0.3}, search)
 local choices = make("ScrollingFrame", {Position = UDim2.fromOffset(8, 48), Size = UDim2.new(1, -16, 1, -56), BackgroundTransparency = 1, BorderSizePixel = 0, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollBarThickness = 3}, popup)
 make("UIListLayout", {Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder}, choices)
 local function closeDropdown()
@@ -349,11 +418,12 @@ connect(gui.Destroying, function() for _, c in ipairs(choiceConnections) do c:Di
 local function openDropdown(anchor, items, selected)
     if closed or activeJob or teleporting or pendingRollback then setStatus("Stop the current action before changing targets."); return end
     closeDropdown()
-    local screen = root.AbsoluteSize
+    local scale = detailScale.Scale
+    local screen = root.AbsoluteSize / scale
     local width, height = math.min(280, screen.X), math.min(250, screen.Y)
-    local pos = anchor.AbsolutePosition - root.AbsolutePosition
+    local pos = (anchor.AbsolutePosition - root.AbsolutePosition) / scale
     local x = math.clamp(pos.X, 0, math.max(0, screen.X - width))
-    local y = pos.Y + anchor.AbsoluteSize.Y
+    local y = pos.Y + anchor.AbsoluteSize.Y / scale
     if y + height > screen.Y then y = pos.Y - height end
     popup.Size = UDim2.fromOffset(width, height)
     popup.Position = UDim2.fromOffset(x, math.clamp(y, 0, math.max(0, screen.Y - height)))
@@ -371,15 +441,18 @@ local function selection(parent, caption, getItems, onSelect, defaultValue)
         openDropdown(b, getItems(), function(value, display)
             selected, selectedLabel = value, display
             b.Text = string.upper(display)
+            b.BackgroundColor3 = Color3.fromRGB(34, 139, 255)
             if onSelect then onSelect(value) end
         end)
     end)
+    if defaultValue ~= nil then b.BackgroundColor3 = Color3.fromRGB(34, 139, 255) end
     return {
         get = function() return selected end,
         label = function() return selectedLabel end,
         set = function(value, display)
             selected, selectedLabel = value, display or tostring(value)
             b.Text = value ~= nil and string.upper(selectedLabel) or "CHOOSE TARGET..."
+            b.BackgroundColor3 = value ~= nil and Color3.fromRGB(34, 139, 255) or BUTTON_BLACK
         end,
     }
 end
@@ -388,10 +461,10 @@ local function numericInput(parent, caption, defaultValue, minimum, maximum)
     local value = defaultValue
     local box = make("TextBox", {
         Size = UDim2.new(1, 0, 0, 30), Text = tostring(defaultValue), ClearTextOnFocus = false,
-        BackgroundColor3 = BUTTON_BLACK, BorderSizePixel = 0, TextSize = 18,
-        FontFace = OSWALD_BOLD, TextColor3 = Color3.new(1, 1, 1), LayoutOrder = #parent:GetChildren(),
+        BackgroundColor3 = Color3.fromRGB(10, 21, 36), BorderSizePixel = 0, TextSize = 21,
+        FontFace = OSWALD_BOLD, TextColor3 = Color3.fromRGB(87, 185, 255), LayoutOrder = #parent:GetChildren(),
     }, parent)
-    make("UICorner", {CornerRadius = UDim.new(0, 4)}, box)
+    make("UIStroke", {Color = Color3.fromRGB(34, 139, 255), Thickness = 1.5, Transparency = 0.3}, box)
     local function commit()
         local n = tonumber(box.Text)
         if not n or n ~= n or math.abs(n) == math.huge then
@@ -539,14 +612,14 @@ local function catalog(kind)
 end
 
 local yenFloor = numericInput(sessionCard, "Minimum yen", 3000, 0, 1000000000000)
-label(sessionCard, "At minimum yen: request rollback, then rejoin. Flow color uses slot switches instead.", 56)
+label(sessionCard, "Yen floor: rollback + rejoin. Flow color switches slots.", 40)
 local hitAction = selection(sessionCard, "When the target is reached", function() return namedItems({"Rejoin", "Stop"}) end, nil, "Rejoin")
-label(sessionCard, "Flow color: reset once, then switch slot at the yen floor. Rejoin on a match.", 56)
+label(sessionCard, "Flow color resets once. Matching your target rejoins.", 40)
 local targets = {}
 local startRolling, stopRolling, rejoin, dupeSlot, getEmotes, redeemCodes, redeemQuests, thirdSlot, manualRollback
 for _, entry in ipairs({
     {"Weapon", "WEAPON", left}, {"Trait", "TRAIT", left}, {"Height", "HEIGHT", left},
-    {"Face", "FACE", right}, {"Flow", "FLOW TYPE", right},
+    {"Face", "FACE", right}, {"Flow", "FLOW TYPE", left},
 }) do
     local kind, title, parent = entry[1], entry[2], entry[3]
     local frame = card(parent, title)
@@ -554,7 +627,7 @@ for _, entry in ipairs({
     button(frame, "Start " .. string.lower(title), function() startRolling(kind) end)
     button(frame, "Stop", function() stopRolling() end)
 end
-local buffCard = card(right, "FLOW BUFF")
+local buffCard = card(left, "FLOW BUFF")
 local buffTarget = selection(buffCard, "Required buff", function()
     local names = {"speed", "power", "hitbox", "cooldown", "stamina"}
     local current = readBuild().buffName
@@ -578,24 +651,28 @@ local colorDirection = selection(colorCard, "Allowed difference", function() ret
 label(colorCard, "Under/Over applies to each RGB channel. Both allows ± tolerance.", 46)
 button(colorCard, "Start color rerolls", function() startRolling("Color") end)
 button(colorCard, "Stop", function() stopRolling() end)
-local controls = card(left, "CONTROLS")
-button(controls, "Stop all rerolls", function() stopRolling() end)
-button(controls, "Rejoin current server", function() rejoin("Manual rejoin") end)
-button(controls, "Dupe second slot", function() dupeSlot() end)
-button(controls, "Get all emotes", function() getEmotes() end)
-button(controls, "Redeem all codes", function() redeemCodes() end)
-button(controls, "Redeem all quests", function() redeemQuests() end)
-button(controls, "Swap to third slot", function() thirdSlot() end)
-label(controls, "Emotes: the four pack requests in your supplied script.", 40)
-button(controls, "Refresh face catalog", function() indexFaces(true); setStatus("Catalog refreshed. Open any target dropdown for current options.") end)
-button(controls, "Unload (P)", unload)
-label(controls, "Drag empty background to move. Drag any edge/corner to resize.", 44)
-button(controls, "Rollback + rejoin", function() manualRollback() end)
+local rollbackCard = card(right, "ROLLBACK")
+label(rollbackCard, "Send the supplied rollback request and rejoin. A running failed roll resumes if teleport queuing is supported.", 70)
+button(rollbackCard, "Rollback + rejoin", function() manualRollback() end)
+button(rollbackCard, "Rejoin current server", function() rejoin("Manual rejoin") end)
+button(rollbackCard, "Stop all rerolls", function() stopRolling() end)
+local slotCard = card(right, "SLOTS")
+label(slotCard, "The slot sequence resets once before switching. Flow color cycles use the existing spinner logic.", 62)
+button(slotCard, "Dupe second slot", function() dupeSlot() end)
+button(slotCard, "Swap to third slot", function() thirdSlot() end)
+button(slotCard, "Get all emotes", function() getEmotes() end)
+local extraCard = card(right, "EXTRAS")
+button(extraCard, "Redeem all codes", function() redeemCodes() end)
+button(extraCard, "Redeem all quests", function() redeemQuests() end)
+button(extraCard, "Refresh face catalog", function() indexFaces(true); setStatus("Catalog refreshed.") end)
+button(extraCard, "Stop all rerolls", function() stopRolling() end)
+button(extraCard, "Unload (P)", unload)
 
 local restoredFaceTexture, restoredFaceTarget
 local function captureSettings(resumeKind, job)
     local state = {
         placeId = game.PlaceId, resumeKind = resumeKind, config = CONFIG, targets = {},
+        menuCategory = menuCategory, menuVisible = menuVisible, assets = ASSET_IDS, uiVersion = UI_VERSION,
         buffTarget = buffTarget.get(), minimum = buffMinimum.get(),
         rgb = {redInput.get(), greenInput.get(), blueInput.get()},
         tolerance = toleranceInput.get(), direction = colorDirection.get(),
@@ -632,7 +709,7 @@ if restored then
     toleranceInput.set(restored.tolerance)
     if restored.direction == "Under" or restored.direction == "Over" or restored.direction == "Both" then colorDirection.set(restored.direction) end
     if restored.hitAction == "Stop" or restored.hitAction == "Rejoin" then hitAction.set(restored.hitAction) end
-    if type(restored.window) == "table" then
+    if restored.uiVersion == UI_VERSION and type(restored.window) == "table" then
         local w = restored.window
         if type(w.width) == "number" and type(w.height) == "number" then window.Size = UDim2.fromOffset(w.width, w.height) end
         if type(w.x) == "number" and type(w.y) == "number" then window.Position = UDim2.fromOffset(w.x, w.y) end
@@ -1142,71 +1219,331 @@ startRolling = function(kind, resuming)
     end)
 end
 
--- Borderless window movement and independent edge resizing.
-local mode, pointer, startPoint, startPosition, startSize
-local function fitScreen()
-    local screen = root.AbsoluteSize
-    if screen.X <= 0 or screen.Y <= 0 then return end
-    local width = math.clamp(window.Size.X.Offset, math.min(CONFIG.MinWidth, screen.X), math.min(CONFIG.MaxWidth, screen.X))
-    local height = math.clamp(window.Size.Y.Offset, math.min(CONFIG.MinHeight, screen.Y), math.min(CONFIG.MaxHeight, screen.Y))
-    window.Size = UDim2.fromOffset(width, height)
-    window.Position = UDim2.fromOffset(math.clamp(window.Position.X.Offset, 0, math.max(0, screen.X - width)), math.clamp(window.Position.Y.Offset, 0, math.max(0, screen.Y - height)))
+-- Character-following ribbon menu. Both containers remain in PlayerGui so
+-- their buttons receive input; Adornee attaches them to the character.
+menuGui = make("BillboardGui", {
+    Name = "LOCKED_Character_Ribbons", ResetOnSpawn = false,
+    Size = UDim2.fromOffset(MENU.Width, MENU.Height),
+    StudsOffset = Vector3.new(0, MENU.VerticalOffset, 0),
+    AlwaysOnTop = true, LightInfluence = 0, Active = true,
+    ClipsDescendants = false, MaxDistance = MENU.MaxDistance,
+    Enabled = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}, playerGui)
+local menuCanvas = make("Frame", {
+    Name = "RibbonCanvas", Size = UDim2.fromOffset(MENU.Width, MENU.Height),
+    BackgroundTransparency = 1, BorderSizePixel = 0,
+}, menuGui)
+local menuScale = make("UIScale", {Scale = 1}, menuCanvas)
+local RIBBON_FONT = Font.new("rbxasset://fonts/families/Bangers.json", Enum.FontWeight.Regular, Enum.FontStyle.Normal)
+local KEY_FONT = Font.new("rbxasset://fonts/families/Roboto.json", Enum.FontWeight.Bold, Enum.FontStyle.Normal)
+local BLUE_GLOW = Color3.fromRGB(34, 139, 255)
+local WHITE = Color3.fromRGB(255, 255, 255)
+local INK = Color3.fromRGB(8, 10, 16)
+local ribbonDefinitions = {
+    {id = "Build", label = "BUILD", key = "1", code = Enum.KeyCode.One, x = 224, y = 106, angle = 22},
+    {id = "Weapon", label = "WEAPON", key = "2", code = Enum.KeyCode.Two, x = 190, y = 246, angle = -10},
+    {id = "Traits", label = "TRAITS", key = "3", code = Enum.KeyCode.Three, x = 238, y = 394, angle = -25},
+    {id = "Flow", label = "FLOW", key = "4", code = Enum.KeyCode.Four, x = 692, y = 99, angle = -19},
+    {id = "Rollback", label = "ROLLBACK", key = "5", code = Enum.KeyCode.Five, x = 722, y = 250, angle = 10},
+    {id = "Slots", label = "DUPE SLOT", key = "6", code = Enum.KeyCode.Six, x = 680, y = 398, angle = 27},
+}
+local categoryCards = {
+    Build = {{"LIVE BUILD"}, {"SESSION", "EXTRAS"}},
+    Weapon = {{"WEAPON"}, {"SESSION"}},
+    Traits = {{"TRAIT", "HEIGHT", "FACE"}, {"SESSION"}},
+    Flow = {{"FLOW TYPE", "FLOW BUFF"}, {"FLOW COLOR", "SESSION"}},
+    Rollback = {{"ROLLBACK"}, {"SESSION"}},
+    Slots = {{"SLOTS"}, {"SESSION", "EXTRAS"}},
+}
+local ribbons = {}
+local openCategory, showRibbons, updateWorldMenu
+local function animate(entry, obj, properties, duration)
+    local old = entry.tweens[obj]
+    if old then old:Cancel() end
+    local tween = TweenService:Create(obj, TweenInfo.new(duration or 0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), properties)
+    entry.tweens[obj] = tween
+    tween:Play()
 end
-local function begin(input, action)
-    if closed or mode or dropdownState then return end
-    if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then return end
-    mode, startPoint, startPosition, startSize = action, input.Position, window.Position, window.Size
-    pointer = input.UserInputType == Enum.UserInputType.Touch and input or nil
+local function ribbonImage(parent, name, id, x, y, w, h, color, transparency, z)
+    return make("ImageLabel", {
+        Name = name, Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(w, h),
+        BackgroundTransparency = 1, BorderSizePixel = 0, Image = assetUri(id),
+        ImageColor3 = color, ImageTransparency = transparency or 0,
+        ScaleType = Enum.ScaleType.Stretch, Active = false, ZIndex = z,
+        Visible = assetUri(id) ~= "",
+    }, parent)
 end
-local function handle(name, pos, size, action, z)
-    local area = make("TextButton", {Name = name, Position = pos, Size = size, Text = "", BackgroundTransparency = 1, BorderSizePixel = 0, Active = true, AutoButtonColor = false, ZIndex = z}, window)
-    connect(area.InputBegan, function(input) begin(input, action) end)
+local function hoverRibbon(entry, hovered)
+    local fill = hovered and WHITE or INK
+    local text = hovered and INK or WHITE
+    animate(entry, entry.scale, {Scale = hovered and 1.075 or 1})
+    animate(entry, entry.wrapper, {Rotation = entry.definition.angle + (hovered and -2 or 0)})
+    animate(entry, entry.plate, {ImageColor3 = fill})
+    animate(entry, entry.fallback, {BackgroundColor3 = fill})
+    animate(entry, entry.text, {TextColor3 = text})
+    animate(entry, entry.glow, {ImageTransparency = hovered and 0.28 or 0.64})
+    animate(entry, entry.badgeOutline, {Color = hovered and BLUE_GLOW or WHITE})
+    animate(entry, entry.accent, {ImageColor3 = hovered and Color3.fromRGB(85, 188, 255) or BLUE_GLOW})
 end
-handle("MoveBackground", UDim2.fromOffset(0, 0), UDim2.fromScale(1, 1), "move", 3)
-handle("LeftEdge", UDim2.fromOffset(0, 0), UDim2.new(0, 9, 1, 0), "L", 20)
-handle("RightEdge", UDim2.new(1, -9, 0, 0), UDim2.new(0, 9, 1, 0), "R", 20)
-handle("TopEdge", UDim2.fromOffset(0, 0), UDim2.new(1, 0, 0, 9), "T", 20)
-handle("BottomEdge", UDim2.new(0, 0, 1, -9), UDim2.new(1, 0, 0, 9), "B", 20)
-local cornerHitbox = CONFIG.CornerHitbox
-handle("TopLeft", UDim2.fromOffset(0, 0), UDim2.fromOffset(cornerHitbox, cornerHitbox), "LT", 21)
-handle("TopRight", UDim2.new(1, -cornerHitbox, 0, 0), UDim2.fromOffset(cornerHitbox, cornerHitbox), "RT", 21)
-handle("BottomLeft", UDim2.new(0, 0, 1, -cornerHitbox), UDim2.fromOffset(cornerHitbox, cornerHitbox), "LB", 21)
-handle("BottomRight", UDim2.new(1, -cornerHitbox, 1, -cornerHitbox), UDim2.fromOffset(cornerHitbox, cornerHitbox), "RB", 21)
-local function resizeAxis(pos, size, delta, leading, trailing, minimum, maximum, screen)
-    if leading then
-        local far = pos + size
-        local near = math.clamp(pos + delta, math.max(0, far - maximum), far - math.min(minimum, far))
-        return math.floor(near), math.floor(far - near)
-    elseif trailing then
-        local available = math.min(maximum, screen - pos)
-        return pos, math.floor(math.clamp(size + delta, math.min(minimum, available), available))
+for _, definition in ipairs(ribbonDefinitions) do
+    local wrapper = make("Frame", {
+        Name = definition.id .. "Ribbon", AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromOffset(definition.x, definition.y), Size = UDim2.fromOffset(326, 92),
+        Rotation = definition.angle, BackgroundTransparency = 1, BorderSizePixel = 0,
+    }, menuCanvas)
+    local scale = make("UIScale", {Scale = 1}, wrapper)
+    local glow = ribbonImage(wrapper, "BlueGlow", ASSET_IDS.RibbonGlow, -62, -40, 448, 168, BLUE_GLOW, 0.64, 1)
+    local accentFallback = make("Frame", {
+        Name = "NativeAccent", Position = UDim2.fromOffset(10, 32), Size = UDim2.fromOffset(308, 49),
+        Rotation = -5, BackgroundColor3 = BLUE_GLOW, BorderSizePixel = 0, ZIndex = 2,
+    }, wrapper)
+    local accent = ribbonImage(wrapper, "BlueSlash", ASSET_IDS.AccentSlash, -10, 16, 350, 88, BLUE_GLOW, 0, 3)
+    local fallback = make("Frame", {
+        Name = "NativePlate", Position = UDim2.fromOffset(13, 6), Size = UDim2.fromOffset(298, 67),
+        BackgroundColor3 = INK, BorderSizePixel = 0, ZIndex = 4,
+    }, wrapper)
+    local fallbackOutline = make("UIStroke", {Color = BLUE_GLOW, Thickness = 1.5, Transparency = 0.55, ApplyStrokeMode = Enum.ApplyStrokeMode.Border}, fallback)
+    local plate = ribbonImage(wrapper, "ComicPlate", ASSET_IDS.RibbonMask, 2, -1, 324, 81, INK, 0, 5)
+    local function syncFallbacks()
+        fallback.Visible = plate.Image == "" or not plate.IsLoaded
+        accentFallback.Visible = accent.Image == "" or not accent.IsLoaded
     end
-    return pos, size
+    connect(plate:GetPropertyChangedSignal("IsLoaded"), syncFallbacks)
+    connect(accent:GetPropertyChangedSignal("IsLoaded"), syncFallbacks)
+    syncFallbacks()
+    local title = make("TextLabel", {
+        Name = "RibbonTitle", Position = UDim2.fromOffset(72, 5), Size = UDim2.fromOffset(236, 60),
+        BackgroundTransparency = 1, Text = definition.label, FontFace = RIBBON_FONT,
+        TextSize = definition.id == "Rollback" and 36 or 40, TextColor3 = WHITE,
+        TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Center,
+        ZIndex = 7, Active = false,
+    }, wrapper)
+    local badge = make("Frame", {
+        Name = "KeyBadge", Position = UDim2.fromOffset(5, 9), Size = UDim2.fromOffset(58, 58),
+        BackgroundColor3 = INK, BorderSizePixel = 0, ZIndex = 8, Active = false,
+    }, wrapper)
+    make("UICorner", {CornerRadius = UDim.new(0.5, 0)}, badge)
+    local badgeOutline = make("UIStroke", {Color = WHITE, Thickness = 2.5, ApplyStrokeMode = Enum.ApplyStrokeMode.Border}, badge)
+    local ring = make("Frame", {
+        Position = UDim2.fromOffset(6, 6), Size = UDim2.fromOffset(46, 46),
+        BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 8,
+    }, badge)
+    make("UICorner", {CornerRadius = UDim.new(0.5, 0)}, ring)
+    make("UIStroke", {Color = WHITE, Thickness = 1.2, Transparency = 0.55}, ring)
+    make("TextLabel", {
+        Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
+        Text = definition.key, FontFace = KEY_FONT, TextSize = 31, TextColor3 = WHITE, ZIndex = 9,
+    }, badge)
+    local hit = make("TextButton", {
+        Name = definition.id .. "Hitbox", Position = UDim2.fromOffset(0, 0),
+        Size = UDim2.fromOffset(326, 90), BackgroundTransparency = 1, BorderSizePixel = 0,
+        Text = "", AutoButtonColor = false, Active = true, Modal = true, ZIndex = 12,
+    }, wrapper)
+    local entry = {definition = definition, wrapper = wrapper, scale = scale, plate = plate,
+        fallback = fallback, text = title, glow = glow, accent = accent, badgeOutline = badgeOutline,
+        tweens = {}, hit = hit}
+    table.insert(ribbons, entry)
+    connect(hit.MouseEnter, function() if not closed then hoverRibbon(entry, true) end end)
+    connect(hit.MouseLeave, function() if not closed then hoverRibbon(entry, false) end end)
+    connect(hit.SelectionGained, function() if not closed then hoverRibbon(entry, true) end end)
+    connect(hit.SelectionLost, function() if not closed then hoverRibbon(entry, false) end end)
+    connect(hit.Activated, function() if openCategory then openCategory(definition.id) end end)
 end
-connect(UIS.InputChanged, function(input)
-    if closed or not mode then return end
-    if pointer then if input ~= pointer then return end
-    elseif input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
-    local delta, screen = input.Position - startPoint, root.AbsoluteSize
-    local x, y, w, h = startPosition.X.Offset, startPosition.Y.Offset, startSize.X.Offset, startSize.Y.Offset
-    if mode == "move" then
-        window.Position = UDim2.fromOffset(math.clamp(x + delta.X, 0, math.max(0, screen.X - w)), math.clamp(y + delta.Y, 0, math.max(0, screen.Y - h)))
-    else
-        x, w = resizeAxis(x, w, delta.X, mode:find("L"), mode:find("R"), CONFIG.MinWidth, CONFIG.MaxWidth, screen.X)
-        y, h = resizeAxis(y, h, delta.Y, mode:find("T"), mode:find("B"), CONFIG.MinHeight, CONFIG.MaxHeight, screen.Y)
-        window.Position, window.Size = UDim2.fromOffset(x, y), UDim2.fromOffset(w, h)
+local menuStatus = make("TextLabel", {
+    Name = "MenuStatus", Position = UDim2.fromOffset(260, 478), Size = UDim2.fromOffset(400, 26),
+    BackgroundTransparency = 1, Text = "LOADING BUILD...", FontFace = RIBBON_FONT,
+    TextSize = 21, TextColor3 = WHITE, TextStrokeColor3 = INK, TextStrokeTransparency = 0.2,
+}, menuCanvas)
+make("TextLabel", {
+    Position = UDim2.fromOffset(220, 511), Size = UDim2.fromOffset(480, 23),
+    BackgroundTransparency = 1, Text = "K  MENU     1-6  SELECT     P  UNLOAD", FontFace = RIBBON_FONT,
+    TextSize = 17, TextColor3 = Color3.fromRGB(215, 237, 255), TextStrokeTransparency = 0.25,
+}, menuCanvas)
+local back = make("TextButton", {
+    Name = "BackToRibbons", Position = UDim2.fromOffset(28, 26), Size = UDim2.fromOffset(65, 28),
+    BackgroundColor3 = INK, BorderSizePixel = 0, Text = "BACK", FontFace = RIBBON_FONT,
+    TextSize = 21, TextColor3 = WHITE, ZIndex = 20, Active = true, Modal = true,
+}, window)
+local stop = make("TextButton", {
+    Name = "AlwaysAvailableStop", Position = UDim2.new(0, 28, 1, -39), Size = UDim2.new(1, -56, 0, 27),
+    BackgroundColor3 = INK, BorderSizePixel = 0, Text = "STOP REROLLS  /  K TO RETURN", FontFace = RIBBON_FONT,
+    TextSize = 17, TextColor3 = WHITE, Active = true, ZIndex = 20,
+}, window)
+styleButton(back); styleButton(stop)
+connect(stop.Activated, function() stopRolling() end)
+local transitioning = false
+local transitionSerial = 0
+local transitionTweens = {}
+local symbolOffsets = {Build = 0, Weapon = 1, Traits = 2, Flow = 3, Rollback = 4, Slots = 5}
+local transitionLayer = make("Frame", {
+    Name = "ComicTransition", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
+    Visible = false, ZIndex = 30, ClipsDescendants = false,
+}, menuCanvas)
+local impact = ribbonImage(transitionLayer, "SelectionImpact", ASSET_IDS.ImpactBurst, 204, 24, 512, 512, BLUE_GLOW, 0.45, 30)
+local sweep = make("Frame", {
+    Name = "RibbonWipe", AnchorPoint = Vector2.new(0.5, 0.5),
+    Position = UDim2.fromOffset(-MENU.Width, MENU.Height * 0.5), Size = UDim2.fromOffset(1600, 300),
+    Rotation = -12, BackgroundTransparency = 1, ZIndex = 31,
+}, transitionLayer)
+local sweepFallback = make("Frame", {
+    Name = "LaunchFallback", Position = UDim2.fromOffset(0, 60), Size = UDim2.new(1, 0, 0, 150),
+    BackgroundColor3 = INK, BorderSizePixel = 0, ZIndex = 31,
+}, sweep)
+make("UIStroke", {Color = WHITE, Thickness = 3}, sweepFallback)
+make("Frame", {Position = UDim2.new(0, 0, 1, 5), Size = UDim2.new(1, 0, 0, 40), BackgroundColor3 = BLUE_GLOW, BorderSizePixel = 0}, sweepFallback)
+local launchImage = ribbonImage(sweep, "LaunchRibbon", ASSET_IDS.LaunchRibbon, 0, 0, 1600, 300, WHITE, 0, 32)
+ribbonImage(sweep, "LaunchStreaks", ASSET_IDS.LaunchStreaks, -80, -12, 1760, 330, WHITE, 0.18, 33)
+local sweepTitle = make("TextLabel", {
+    Name = "LaunchTitle", Position = UDim2.fromOffset(470, 54), Size = UDim2.fromOffset(700, 124),
+    BackgroundTransparency = 1, Text = "BUILD", FontFace = RIBBON_FONT, TextSize = 88,
+    TextColor3 = WHITE, TextStrokeColor3 = INK, TextStrokeTransparency = 0, ZIndex = 35,
+}, sweep)
+local sweepSymbol = make("ImageLabel", {
+    Name = "LaunchSymbol", Position = UDim2.fromOffset(422, 78), Size = UDim2.fromOffset(74, 74),
+    BackgroundTransparency = 1, Image = assetUri(ASSET_IDS.CategorySymbols), ImageColor3 = WHITE,
+    ImageRectSize = Vector2.new(128, 128), ImageRectOffset = Vector2.new(0, 0), ZIndex = 35,
+}, sweep)
+local function syncLaunchFallback() sweepFallback.Visible = launchImage.Image == "" or not launchImage.IsLoaded end
+connect(launchImage:GetPropertyChangedSignal("IsLoaded"), syncLaunchFallback); syncLaunchFallback()
+local function cancelTransition()
+    transitionSerial = transitionSerial + 1
+    transitioning, transitionLayer.Visible = false, false
+    for _, tween in ipairs(transitionTweens) do tween:Cancel() end
+    table.clear(transitionTweens)
+end
+local function showCategoryContents(category)
+    -- Put the selected controls first; live build details have their own page.
+    -- This keeps the long live-build list from hiding Flow / Rollback controls.
+    local columns = categoryCards[category]
+    for _, frame in pairs(cardsByTitle) do frame.Visible = false end
+    for columnIndex, titles in ipairs(columns) do
+        for index, title in ipairs(titles) do
+            local frame = cardsByTitle[title]
+            frame.Parent = columnIndex == 1 and left or right
+            frame.LayoutOrder, frame.Visible = index, true
+        end
+    end
+    left.CanvasPosition, right.CanvasPosition = Vector2.new(0, 0), Vector2.new(0, 0)
+    menuCategory, menuVisible = category, false
+    panelCategoryTitle.Text = category == "Slots" and "DUPE SLOT" or string.upper(category)
+    panelSymbol.ImageRectOffset = Vector2.new((symbolOffsets[category] or 0) * 128, 0)
+    root.Visible, window.GroupTransparency = true, 0
+    updateWorldMenu()
+end
+showRibbons = function()
+    if closed then return end
+    cancelTransition(); closeDropdown()
+    root.Visible = false
+    menuCategory, menuVisible = nil, true
+    for _, entry in ipairs(ribbons) do entry.wrapper.Visible = true; hoverRibbon(entry, false) end
+    updateWorldMenu()
+end
+openCategory = function(category, instant)
+    if closed or not categoryCards[category] or transitioning then return end
+    closeDropdown()
+    if instant or not MENU.ClickTransition then showCategoryContents(category); return end
+    transitionSerial = transitionSerial + 1
+    local token = transitionSerial
+    transitioning, menuCategory, menuVisible = true, category, false
+    root.Visible = false
+    for _, entry in ipairs(ribbons) do entry.wrapper.Visible = false end
+    sweepTitle.Text = category == "Slots" and "DUPE SLOT" or string.upper(category)
+    sweepSymbol.ImageRectOffset = Vector2.new((symbolOffsets[category] or 0) * 128, 0)
+    sweep.Position = UDim2.fromOffset(-MENU.Width * 1.6, MENU.Height * 0.5 + 105)
+    impact.ImageTransparency = 0.55
+    transitionLayer.Visible = true
+    updateWorldMenu()
+    local duration = math.clamp(MENU.TransitionSeconds, 0.24, 1.2)
+    local function play(obj, time, direction, goal)
+        local tween = TweenService:Create(obj, TweenInfo.new(time, Enum.EasingStyle.Quad, direction), goal)
+        table.insert(transitionTweens, tween); tween:Play()
+    end
+    play(sweep, duration * 0.34, Enum.EasingDirection.Out, {Position = UDim2.fromOffset(MENU.Width * 0.5, MENU.Height * 0.5)})
+    play(impact, duration * 0.72, Enum.EasingDirection.Out, {ImageTransparency = 1})
+    task.delay(duration * 0.62, function()
+        if closed or token ~= transitionSerial then return end
+        play(sweep, duration * 0.34, Enum.EasingDirection.In, {Position = UDim2.fromOffset(MENU.Width * 2.6, MENU.Height * 0.5 - 105)})
+    end)
+    task.delay(duration, function()
+        if closed or token ~= transitionSerial then return end
+        transitioning, transitionLayer.Visible = false, false
+        table.clear(transitionTweens)
+        showCategoryContents(category)
+    end)
+end
+connect(back.Activated, showRibbons)
+local currentMenuScale
+local layoutSignature
+local function fitWorldPanels(dt)
+    local camera = workspace.CurrentCamera
+    local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
+    local targetScale = MENU.Scale
+    local anchor = menuGui.Adornee
+    if camera and anchor then
+        local center = camera:WorldToViewportPoint(anchor.Position)
+        local above = camera:WorldToViewportPoint(anchor.Position + camera.CFrame.UpVector)
+        if center.Z > 0 then
+            local dx, dy = above.X - center.X, above.Y - center.Y
+            local pixelsPerStud = math.sqrt(dx * dx + dy * dy)
+            targetScale = math.clamp(pixelsPerStud * MENU.WorldWidth / MENU.Width, MENU.MinScale, MENU.Scale)
+        end
+    end
+    targetScale = math.min(targetScale, (viewport.X - 28) / MENU.Width, (viewport.Y - 28) / MENU.Height)
+    targetScale = math.max(0.05, targetScale)
+    if not currentMenuScale or not dt then currentMenuScale = targetScale
+    else currentMenuScale = currentMenuScale + (targetScale - currentMenuScale) * (1 - math.exp(-MENU.ScaleFollowSpeed * dt)) end
+    menuScale.Scale = currentMenuScale
+    menuGui.Size = UDim2.fromOffset(MENU.Width * currentMenuScale, MENU.Height * currentMenuScale)
+    local width = math.clamp(window.Size.X.Offset, CONFIG.MinWidth, CONFIG.MaxWidth)
+    local height = math.clamp(window.Size.Y.Offset, CONFIG.MinHeight, CONFIG.MaxHeight)
+    local signature = string.format("%g:%g:%g:%g", viewport.X, viewport.Y, width, height)
+    if signature == layoutSignature then return end
+    layoutSignature = signature
+    window.Size, window.Position = UDim2.fromOffset(width, height), UDim2.fromOffset(24, 24)
+    local canvasW, canvasH = width + 48, height + 48
+    local factor = math.max(0.1, math.min(MENU.PanelScale, (viewport.X - 32) / canvasW, (viewport.Y - 32) / canvasH))
+    root.Size, detailScale.Scale = UDim2.fromOffset(canvasW, canvasH), factor
+    gui.Size = UDim2.fromOffset(canvasW * factor, canvasH * factor)
+end
+updateWorldMenu = function()
+    if closed then return end
+    local character = player.Character
+    local anchor = character and (character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("UpperTorso") or character:FindFirstChild("Torso") or character:FindFirstChild("Head"))
+    if gui.Adornee ~= anchor then gui.Adornee = anchor end
+    if menuGui.Adornee ~= anchor then menuGui.Adornee = anchor end
+    gui.Enabled = anchor ~= nil and root.Visible
+    menuGui.Enabled = anchor ~= nil and (menuVisible or transitioning) and not root.Visible
+    local jobName = activeJob and not activeJob.cancelled and activeJob.kind
+    menuStatus.Text = jobName and ("ROLLING " .. string.upper(jobName)) or ("YEN " .. (lastKnownYen ~= nil and tostring(lastKnownYen) or "LOADING..."))
+end
+connect(player.CharacterAdded, function()
+    gui.Adornee, menuGui.Adornee = nil, nil
+    task.defer(function() if not closed then updateWorldMenu() end end)
+end)
+connect(UIS.InputBegan, function(input, processed)
+    if closed or UIS:GetFocusedTextBox() then return end
+    if input.KeyCode == Enum.KeyCode.P then unload(); return end
+    if processed then return end
+    if input.KeyCode == MENU.ToggleKey then
+        if transitioning or root.Visible then showRibbons()
+        else menuVisible = not menuVisible; updateWorldMenu() end
+        return
+    end
+    if MENU.Shortcuts and menuVisible and not root.Visible then
+        for _, definition in ipairs(ribbonDefinitions) do
+            if input.KeyCode == definition.code then openCategory(definition.id); return end
+        end
     end
 end)
-connect(UIS.InputEnded, function(input)
-    if (pointer and input == pointer) or (not pointer and input.UserInputType == Enum.UserInputType.MouseButton1) then mode, pointer = nil, nil end
+-- Named controls also make manual testing in Studio or an executor straightforward.
+session.openCategory, session.showRibbons = openCategory, showRibbons
+session.worldMenu, session.worldPanel = menuGui, gui
+updateWorldMenu()
+fitWorldPanels()
+connect(RunService.RenderStepped, function(dt)
+    if not closed then fitWorldPanels(dt) end
 end)
-connect(UIS.InputBegan, function(input)
-    if input.KeyCode == Enum.KeyCode.P and not UIS:GetFocusedTextBox() then unload() end
-end)
-connect(root:GetPropertyChangedSignal("AbsoluteSize"), function() mode, pointer = nil, nil; closeDropdown(); fitScreen() end)
-task.defer(function() if not closed then fitScreen() end end)
 
-local lastKnownYen
 local function refreshBuild()
     local build = readBuild()
     live.Player.Text = player.DisplayName .. " (@" .. player.Name .. ")"
@@ -1224,6 +1561,15 @@ local function refreshBuild()
     live.Buff.Text = "Buff: " .. tostring(build.buffName or "Loading...")
     live.Percent.Text = "Buff %: " .. (build.Buff and string.format("%.1f%%", build.Buff) or "Loading...")
     live.Face.Text = "Face: " .. (build.Face or (build.faceTexture and "Asset " .. build.faceTexture or "Loading..."))
+    if menuCategory == "Flow" then
+        local percent = build.Buff and string.format("%.1f%%", build.Buff) or "..."
+        local color = build.Color and string.format("#%02X%02X%02X", math.floor(build.Color[1] + 0.5), math.floor(build.Color[2] + 0.5), math.floor(build.Color[3] + 0.5)) or "..."
+        buildBrief.Text = string.format("FLOW  %s     BUFF  %s / %s     RGB  %s", build.Flow or "...", build.buffName or "...", percent, color)
+    elseif menuCategory == "Traits" then
+        buildBrief.Text = string.format("TRAIT  %s     HEIGHT  %s     FACE  %s", tostring(build.Trait or "..."), heightText(build.Height), tostring(build.Face or "..."))
+    else
+        buildBrief.Text = string.format("WEAPON  %s     TRAIT  %s     HEIGHT  %s", tostring(build.Weapon or "..."), tostring(build.Trait or "..."), heightText(build.Height))
+    end
     if build.Color then
         local r, g, b = math.floor(build.Color[1] + 0.5), math.floor(build.Color[2] + 0.5), math.floor(build.Color[3] + 0.5)
         live.Color.Text = string.format("Color: #%02X%02X%02X\nRGB %d, %d, %d", r, g, b, r, g, b)
@@ -1236,24 +1582,34 @@ local function refreshBuild()
         pingLabel.Text = string.format("Ping: %.0f ms%s | minimum delay %.3f s", ping, available and "" or " (fallback)", ping / 1000 + 0.02)
     end
 end
--- Load the supplied texture without blocking startup or spinning.
+-- Asset loading does not block input or character binding.
 task.spawn(function()
-    local ok, err = pcall(function()
-        ContentProvider:PreloadAsync({background}, function(_, state)
-            if not closed and (state == Enum.AssetFetchStatus.Failure or state == Enum.AssetFetchStatus.TimedOut) then
-                warn("LOCKED GUI texture 114239702819151 could not load: " .. tostring(state))
-            end
-        end)
-    end)
-    if not ok and not closed then warn("LOCKED GUI texture: " .. tostring(err)) end
+    local images = {}
+    for _, id in pairs(ASSET_IDS) do
+        local uri = assetUri(id)
+        if uri ~= "" then table.insert(images, uri) end
+    end
+    if #images > 0 then
+        local ok, err = pcall(function() ContentProvider:PreloadAsync(images) end)
+        if not ok then warn("LOCKED menu assets: " .. tostring(err)) end
+    end
 end)
 task.spawn(function()
     while not closed do
-        local ok, err = pcall(refreshBuild)
+        local ok, err = pcall(function()
+            refreshBuild()
+            updateWorldMenu()
+        end)
         if not ok then warn("Build viewer: " .. tostring(err)) end
         task.wait(0.1)
     end
 end)
+
+if restored and restored.menuCategory and categoryCards[restored.menuCategory] then
+    openCategory(restored.menuCategory, true)
+elseif restored and restored.menuVisible == false then
+    menuVisible = false; updateWorldMenu()
+end
 
 -- Resume once, only after a failed roll's rollback rejoin. A win restores the UI
 -- without starting another roll. Stop/P work even while data is still loading.
@@ -1263,6 +1619,6 @@ if restored and restored.placeId == game.PlaceId and REMOTE_NAMES[restored.resum
     end)
 end
 ]====]
-local run, err = loadstring(source, "LOCKED Build Roller")
+local run, err = loadstring(source, "LOCKED Comic GUI")
 if not run then error(err) end
 run(source, nil)
