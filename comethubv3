@@ -1,5 +1,6 @@
--- LOCKED Comic GUI: run ONLY this script. K menu | P unload | 1-6 categories.
--- PNG upload mapping and editable sizes are at the top of the source below.
+-- LOCKED 3D Comic GUI: run this entire file. K menu | P unload | 1-8 actions.
+-- Two screen panels: Build and Flow. Six utility actions run directly.
+-- Double-sided 3D ribbons. Your current fifteen image IDs and settings are preserved.
 local source = [====[
 -- LOCKED build viewer + reroll, slot, and emote controls.
 -- Client runtime. K toggles the character menu; P unloads.
@@ -28,13 +29,16 @@ local ASSET_IDS = {
     CategorySymbols = 70785419966031, -- assets/category_symbols.png
 }
 local MENU = {
-    Width = 920, Height = 560,
-    Scale = 0.66, MinScale = 0.18, PanelScale = 0.82,
-    WorldWidth = 22, ScaleFollowSpeed = 16,
+    Width = 920, Height = 560, -- Selection-wipe canvas only.
+    WorldScale = 0.85,        -- Overall physical size of the menu around your character.
+    RibbonStudWidth = 8.4,     -- Fixed physical ribbon width; no camera-size animation.
+    LayerDepth = 0.18,        -- Blue accent depth behind each black ribbon face.
+    HoverDepth = 0.3,         -- A hovered ribbon moves forward instead of growing.
+    OrbitFollowSpeed = 15,     -- Camera orbit follow; lower gives more parallax.
     VerticalOffset = 0.3, MaxDistance = 100,
+    PanelScale = 0.9,         -- Screen-space Build / Flow panel size.
     ToggleKey = Enum.KeyCode.K, Shortcuts = true,
-    ClickTransition = true,
-    TransitionSeconds = 0.46, -- Entire diagonal banner animation. Set ClickTransition=false to skip.
+    ClickTransition = true, TransitionSeconds = 0.46,
 }
 local function assetUri(id)
     if type(id) == "number" and id > 0 then return "rbxassetid://" .. tostring(math.floor(id)) end
@@ -44,7 +48,8 @@ local function assetUri(id)
     end
     return ""
 end
-local menuGui
+local menuGui, worldFolder
+local worldSurfaces = {}
 local menuCategory, menuVisible = nil, true
 local lastKnownYen
 local HttpService = game:GetService("HttpService")
@@ -53,6 +58,13 @@ local restored
 if type(RESUME_JSON) == "string" then
     local ok, state = pcall(function() return HttpService:JSONDecode(RESUME_JSON) end)
     if ok and type(state) == "table" then restored = state end
+end
+if restored then
+    local oldCategory = restored.menuCategory
+    if oldCategory == "Weapon" or oldCategory == "Traits" then restored.menuCategory = "Build"
+    elseif oldCategory and oldCategory ~= "Build" and oldCategory ~= "Flow" then
+        restored.menuCategory, restored.menuVisible = nil, true
+    end
 end
 local previous = executorEnv.__LOCKEDBuildRoller
 -- Keep explicitly supplied IDs; otherwise recover the IDs already loaded by
@@ -72,7 +84,7 @@ if type(previous) == "table" then
         CrispPanelInk = "PanelBody", CrispPanelFrame = "PanelFrame", CrispTitleBar = "CategoryHeader",
         ButtonPlate = "ButtonPlate", ButtonEdge = "ButtonEdge", SelectedMarker = "SelectedMarker",
         LaunchRibbon = "LaunchRibbon", LaunchStreaks = "LaunchStreaks", SelectionImpact = "ImpactBurst",
-        PanelGrain = "PanelGrain", CategorySymbol = "CategorySymbols",
+        PanelGrain = "PanelGrain", CategorySymbol = "CategorySymbols", HeaderMask = "RibbonMask", HeaderAccent = "AccentSlash",
     }
     for _, field in ipairs({"worldMenu", "worldPanel"}) do
         pcall(function()
@@ -88,7 +100,7 @@ if type(previous) == "table" then
 end
 executorEnv.__LOCKEDRibbonAssetIds = ASSET_IDS
 if type(previous) == "table" and type(previous.unload) == "function" then pcall(previous.unload) end
-local UI_VERSION = 3
+local UI_VERSION = 4
 local session = {assetIds = ASSET_IDS, uiVersion = UI_VERSION}
 executorEnv.__LOCKEDBuildRoller = session
 local Players = game:GetService("Players")
@@ -155,17 +167,18 @@ local function make(class, props, parent)
     obj.Parent = parent
     return obj
 end
-local gui = make("BillboardGui", {
-    Name = "LOCKED_Build_Auto_Roller", ResetOnSpawn = false,
-    Size = UDim2.fromOffset(CONFIG.DefaultWidth + 48, CONFIG.DefaultHeight + 48),
-    StudsOffset = Vector3.new(0, MENU.VerticalOffset, 0),
-    AlwaysOnTop = true, LightInfluence = 0, Active = true,
-    ClipsDescendants = false, MaxDistance = MENU.MaxDistance,
-    Enabled = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+local gui = make("ScreenGui", {
+    Name = "LOCKED_Build_Auto_Roller", ResetOnSpawn = false, IgnoreGuiInset = true,
+    DisplayOrder = 2147483647, Enabled = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 }, playerGui)
+local scrim = make("Frame", {
+    Name = "PanelShade", Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(0, 0, 0),
+    BackgroundTransparency = 0.48, BorderSizePixel = 0, Active = true, Visible = false, ZIndex = 0,
+}, gui)
 local root = make("Frame", {
+    Name = "ScreenPanelRoot", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
     Size = UDim2.fromOffset(CONFIG.DefaultWidth + 48, CONFIG.DefaultHeight + 48),
-    BackgroundTransparency = 1, BorderSizePixel = 0, Visible = false,
+    BackgroundTransparency = 1, BorderSizePixel = 0, Visible = false, ZIndex = 10,
 }, gui)
 local detailScale = make("UIScale", {Scale = 1}, root)
 local window = make("CanvasGroup", {
@@ -202,23 +215,47 @@ make("ImageLabel", {
     BackgroundTransparency = 1, Image = assetUri(ASSET_IDS.PanelGrain), ImageTransparency = 0.85,
     ScaleType = Enum.ScaleType.Tile, TileSize = UDim2.fromOffset(128, 128), ZIndex = 3,
 }, window)
-local panelTitlePlate = make("ImageLabel", {
-    Name = "CrispTitleBar", Position = UDim2.fromOffset(18, 10), Size = UDim2.new(1, -36, 0, 70),
-    BackgroundTransparency = 1, Image = assetUri(ASSET_IDS.CategoryHeader), ZIndex = 4,
+-- A menu-style black ribbon replaces the old full-width white title strip.
+local panelTitlePlate = make("Frame", {
+    Name = "PanelRibbonHeader", Position = UDim2.fromOffset(18, 0), Size = UDim2.fromOffset(382, 88),
+    BackgroundTransparency = 1, Rotation = -3, ZIndex = 12,
 }, window)
+make("ImageLabel", {
+    Name = "HeaderGlow", Position = UDim2.fromOffset(-25, -13), Size = UDim2.fromOffset(430, 120),
+    BackgroundTransparency = 1, Image = assetUri(ASSET_IDS.RibbonGlow),
+    ImageColor3 = Color3.fromRGB(34, 139, 255), ImageTransparency = 0.57, ZIndex = 12,
+}, panelTitlePlate)
+local headerAccentFallback = make("Frame", {
+    Position = UDim2.fromOffset(14, 47), Size = UDim2.fromOffset(350, 25),
+    BackgroundColor3 = Color3.fromRGB(34, 139, 255), BorderSizePixel = 0, Rotation = -3, ZIndex = 13,
+}, panelTitlePlate)
+local headerAccent = make("ImageLabel", {
+    Name = "HeaderAccent", Position = UDim2.fromOffset(4, 15), Size = UDim2.fromOffset(370, 76),
+    BackgroundTransparency = 1, Image = assetUri(ASSET_IDS.AccentSlash),
+    ImageColor3 = Color3.fromRGB(34, 139, 255), ZIndex = 13,
+}, panelTitlePlate)
 local panelTitleFallback = make("Frame", {
-    Name = "HeaderFallback", Position = UDim2.fromOffset(9, 10), Size = UDim2.new(1, -18, 1, -20),
-    BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, ZIndex = 4,
+    Name = "HeaderFallback", Position = UDim2.fromOffset(16, 10), Size = UDim2.fromOffset(347, 57),
+    BackgroundColor3 = BUTTON_BLACK, BorderSizePixel = 0, ZIndex = 14,
 }, panelTitlePlate)
-local panelSymbol = make("ImageLabel", {
-    Name = "CategorySymbol", Position = UDim2.fromOffset(88, 13), Size = UDim2.fromOffset(33, 33),
-    BackgroundTransparency = 1, Image = assetUri(ASSET_IDS.CategorySymbols), ImageColor3 = BUTTON_BLACK,
-    ImageRectSize = Vector2.new(128, 128), ImageRectOffset = Vector2.new(0, 0), ZIndex = 6,
+local headerMask = make("ImageLabel", {
+    Name = "HeaderMask", Position = UDim2.fromOffset(6, 2), Size = UDim2.fromOffset(371, 75),
+    BackgroundTransparency = 1, Image = assetUri(ASSET_IDS.RibbonMask), ImageColor3 = BUTTON_BLACK, ZIndex = 14,
 }, panelTitlePlate)
+local panelBadge = make("Frame", {
+    Name = "HeaderKeyBadge", Position = UDim2.fromOffset(12, 9), Size = UDim2.fromOffset(57, 57),
+    BackgroundColor3 = BUTTON_BLACK, BorderSizePixel = 0, ZIndex = 16,
+}, panelTitlePlate)
+make("UICorner", {CornerRadius = UDim.new(0.5, 0)}, panelBadge)
+make("UIStroke", {Color = Color3.new(1, 1, 1), Thickness = 2.5}, panelBadge)
+local panelBadgeText = make("TextLabel", {
+    Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "1",
+    FontFace = OSWALD_BOLD, TextSize = 32, TextColor3 = Color3.new(1, 1, 1), ZIndex = 17,
+}, panelBadge)
 local panelCategoryTitle = make("TextLabel", {
-    Name = "CategoryTitle", Position = UDim2.fromOffset(128, 4), Size = UDim2.new(1, -160, 1, -15),
-    BackgroundTransparency = 1, Text = "BUILD", FontFace = OSWALD_BOLD, TextSize = 34,
-    TextColor3 = BUTTON_BLACK, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 6,
+    Name = "CategoryTitle", Position = UDim2.fromOffset(79, 5), Size = UDim2.fromOffset(267, 59),
+    BackgroundTransparency = 1, Text = "BUILD", FontFace = OSWALD_BOLD, TextSize = 38,
+    TextColor3 = Color3.new(1, 1, 1), TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 17,
 }, panelTitlePlate)
 local buildBrief = make("TextLabel", {
     Name = "BuildBrief", Position = UDim2.fromOffset(28, 102), Size = UDim2.new(1, -56, 0, 23),
@@ -236,13 +273,20 @@ end
 local function syncPanelFallback() panelNative.Visible = panelInk.Image == "" or not panelInk.IsLoaded end
 connect(panelInk:GetPropertyChangedSignal("IsLoaded"), syncPanelFallback)
 syncPanelFallback()
-local function syncHeaderFallback() panelTitleFallback.Visible = panelTitlePlate.Image == "" or not panelTitlePlate.IsLoaded end
-connect(panelTitlePlate:GetPropertyChangedSignal("IsLoaded"), syncHeaderFallback); syncHeaderFallback()
+local function syncHeaderFallback()
+    panelTitleFallback.Visible = headerMask.Image == "" or not headerMask.IsLoaded
+    headerAccentFallback.Visible = headerAccent.Image == "" or not headerAccent.IsLoaded
+end
+connect(headerMask:GetPropertyChangedSignal("IsLoaded"), syncHeaderFallback)
+connect(headerAccent:GetPropertyChangedSignal("IsLoaded"), syncHeaderFallback); syncHeaderFallback()
 local function cleanup()
     if closed then return end
     closed = true
     pendingRollback = false
     if menuGui and menuGui.Parent then menuGui:Destroy() end
+    for _, surface in ipairs(worldSurfaces) do surface:Destroy() end
+    table.clear(worldSurfaces)
+    if worldFolder then worldFolder:Destroy() end
     if activeJob then activeJob.cancelled = true end
     for _, c in ipairs(connections) do c:Disconnect() end
     table.clear(connections)
@@ -651,22 +695,8 @@ local colorDirection = selection(colorCard, "Allowed difference", function() ret
 label(colorCard, "Under/Over applies to each RGB channel. Both allows ± tolerance.", 46)
 button(colorCard, "Start color rerolls", function() startRolling("Color") end)
 button(colorCard, "Stop", function() stopRolling() end)
-local rollbackCard = card(right, "ROLLBACK")
-label(rollbackCard, "Send the supplied rollback request and rejoin. A running failed roll resumes if teleport queuing is supported.", 70)
-button(rollbackCard, "Rollback + rejoin", function() manualRollback() end)
-button(rollbackCard, "Rejoin current server", function() rejoin("Manual rejoin") end)
-button(rollbackCard, "Stop all rerolls", function() stopRolling() end)
-local slotCard = card(right, "SLOTS")
-label(slotCard, "The slot sequence resets once before switching. Flow color cycles use the existing spinner logic.", 62)
-button(slotCard, "Dupe second slot", function() dupeSlot() end)
-button(slotCard, "Swap to third slot", function() thirdSlot() end)
-button(slotCard, "Get all emotes", function() getEmotes() end)
-local extraCard = card(right, "EXTRAS")
-button(extraCard, "Redeem all codes", function() redeemCodes() end)
-button(extraCard, "Redeem all quests", function() redeemQuests() end)
-button(extraCard, "Refresh face catalog", function() indexFaces(true); setStatus("Catalog refreshed.") end)
-button(extraCard, "Stop all rerolls", function() stopRolling() end)
-button(extraCard, "Unload (P)", unload)
+button(sessionCard, "Rejoin current server", function() rejoin("Manual rejoin") end)
+button(statusCard, "Refresh face catalog", function() indexFaces(true); setStatus("Catalog refreshed.") end)
 
 local restoredFaceTexture, restoredFaceTarget
 local function captureSettings(resumeKind, job)
@@ -775,7 +805,7 @@ local function matches(build, job)
     if job.kind == "Buff" then
         local actual = type(build.buffName) == "string" and build.buffName:match("^%s*(.-)%s*$") or ""
         local desired = job.buffTarget or "speed"
-        return string.lower(actual) == string.lower(desired) and build.Buff ~= nil and build.Buff + 0.00001 >= job.minimum
+        return string.lower(actual) == string.lower(desired) and build.Buff ~= nil and build.Buff + 0.099 >= job.minimum
     end
     if job.kind == "Color" then return colorMatches(build.Color, job.rgb, job.tolerance, job.direction) end
     if job.kind == "Face" then
@@ -1219,329 +1249,361 @@ startRolling = function(kind, resuming)
     end)
 end
 
--- Character-following ribbon menu. Both containers remain in PlayerGui so
--- their buttons receive input; Adornee attaches them to the character.
-menuGui = make("BillboardGui", {
-    Name = "LOCKED_Character_Ribbons", ResetOnSpawn = false,
-    Size = UDim2.fromOffset(MENU.Width, MENU.Height),
-    StudsOffset = Vector3.new(0, MENU.VerticalOffset, 0),
-    AlwaysOnTop = true, LightInfluence = 0, Active = true,
-    ClipsDescendants = false, MaxDistance = MENU.MaxDistance,
-    Enabled = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-}, playerGui)
-local menuCanvas = make("Frame", {
-    Name = "RibbonCanvas", Size = UDim2.fromOffset(MENU.Width, MENU.Height),
-    BackgroundTransparency = 1, BorderSizePixel = 0,
-}, menuGui)
-local menuScale = make("UIScale", {Scale = 1}, menuCanvas)
-local RIBBON_FONT = Font.new("rbxasset://fonts/families/Bangers.json", Enum.FontWeight.Regular, Enum.FontStyle.Normal)
+-- Real 3D ribbons: fixed-size local Parts with interactive SurfaceGui faces.
+-- The blue accent and black face sit on separate physical depth layers.
+menuGui = make("Folder", {Name = "LOCKED_Character_Ribbons"}, playerGui)
+local orphan = workspace:FindFirstChild("LOCKED_Local_Ribbon_Parts")
+if orphan then orphan:Destroy() end
+worldFolder = make("Folder", {Name = "LOCKED_Local_Ribbon_Parts"}, workspace)
+local RIBBON_FONT = OSWALD_BOLD
 local KEY_FONT = Font.new("rbxasset://fonts/families/Roboto.json", Enum.FontWeight.Bold, Enum.FontStyle.Normal)
-local BLUE_GLOW = Color3.fromRGB(34, 139, 255)
-local WHITE = Color3.fromRGB(255, 255, 255)
-local INK = Color3.fromRGB(8, 10, 16)
+local BLUE_GLOW, WHITE, INK = Color3.fromRGB(34, 139, 255), Color3.new(1, 1, 1), BUTTON_BLACK
 local ribbonDefinitions = {
-    {id = "Build", label = "BUILD", key = "1", code = Enum.KeyCode.One, x = 224, y = 106, angle = 22},
-    {id = "Weapon", label = "WEAPON", key = "2", code = Enum.KeyCode.Two, x = 190, y = 246, angle = -10},
-    {id = "Traits", label = "TRAITS", key = "3", code = Enum.KeyCode.Three, x = 238, y = 394, angle = -25},
-    {id = "Flow", label = "FLOW", key = "4", code = Enum.KeyCode.Four, x = 692, y = 99, angle = -19},
-    {id = "Rollback", label = "ROLLBACK", key = "5", code = Enum.KeyCode.Five, x = 722, y = 250, angle = 10},
-    {id = "Slots", label = "DUPE SLOT", key = "6", code = Enum.KeyCode.Six, x = 680, y = 398, angle = 27},
+    {id="Build", label="BUILD", key="1", code=Enum.KeyCode.One, x=-5.4, y=3.8, z=-0.3, yaw=26, pitch=-5, roll=12},
+    {id="Flow", label="FLOW", key="2", code=Enum.KeyCode.Two, x=5.4, y=3.8, z=0.7, yaw=-28, pitch=-4, roll=-12},
+    {id="Rollback", label="ROLLBACK", key="3", code=Enum.KeyCode.Three, x=-5.8, y=1.3, z=1.0, yaw=32, pitch=-2, roll=-4},
+    {id="DupeSlot", label="DUPE SLOT", key="4", code=Enum.KeyCode.Four, x=5.8, y=1.3, z=-0.6, yaw=-24, pitch=2, roll=4},
+    {id="ThirdSlot", label="THIRD SLOT", key="5", code=Enum.KeyCode.Five, x=-5.6, y=-1.2, z=-0.7, yaw=24, pitch=4, roll=-7},
+    {id="Quests", label="REDEEM QUESTS", key="6", code=Enum.KeyCode.Six, x=5.6, y=-1.2, z=1.0, yaw=-31, pitch=3, roll=7},
+    {id="Codes", label="REDEEM CODES", key="7", code=Enum.KeyCode.Seven, x=-5.1, y=-3.7, z=0.6, yaw=30, pitch=6, roll=-13},
+    {id="Emotes", label="ALL EMOTES", key="8", code=Enum.KeyCode.Eight, x=5.1, y=-3.7, z=-0.8, yaw=-25, pitch=5, roll=13},
 }
 local categoryCards = {
-    Build = {{"LIVE BUILD"}, {"SESSION", "EXTRAS"}},
-    Weapon = {{"WEAPON"}, {"SESSION"}},
-    Traits = {{"TRAIT", "HEIGHT", "FACE"}, {"SESSION"}},
-    Flow = {{"FLOW TYPE", "FLOW BUFF"}, {"FLOW COLOR", "SESSION"}},
-    Rollback = {{"ROLLBACK"}, {"SESSION"}},
-    Slots = {{"SLOTS"}, {"SESSION", "EXTRAS"}},
+    Build = {{"WEAPON", "TRAIT", "SESSION"}, {"HEIGHT", "FACE", "LIVE BUILD"}},
+    Flow = {{"FLOW TYPE", "FLOW BUFF"}, {"FLOW COLOR", "SESSION", "LIVE BUILD"}},
 }
 local ribbons = {}
-local openCategory, showRibbons, updateWorldMenu
-local function animate(entry, obj, properties, duration)
-    local old = entry.tweens[obj]
-    if old then old:Cancel() end
-    local tween = TweenService:Create(obj, TweenInfo.new(duration or 0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), properties)
-    entry.tweens[obj] = tween
-    tween:Play()
-end
+local openCategory, showRibbons, updateWorldMenu, activateEntry
 local function ribbonImage(parent, name, id, x, y, w, h, color, transparency, z)
     return make("ImageLabel", {
-        Name = name, Position = UDim2.fromOffset(x, y), Size = UDim2.fromOffset(w, h),
-        BackgroundTransparency = 1, BorderSizePixel = 0, Image = assetUri(id),
-        ImageColor3 = color, ImageTransparency = transparency or 0,
-        ScaleType = Enum.ScaleType.Stretch, Active = false, ZIndex = z,
-        Visible = assetUri(id) ~= "",
+        Name=name, Position=UDim2.fromOffset(x,y), Size=UDim2.fromOffset(w,h),
+        BackgroundTransparency=1, BorderSizePixel=0, Image=assetUri(id), ImageColor3=color,
+        ImageTransparency=transparency or 0, ScaleType=Enum.ScaleType.Stretch,
+        Active=false, ZIndex=z, Visible=assetUri(id)~="",
     }, parent)
 end
 local function hoverRibbon(entry, hovered)
-    local fill = hovered and WHITE or INK
-    local text = hovered and INK or WHITE
-    animate(entry, entry.scale, {Scale = hovered and 1.075 or 1})
-    animate(entry, entry.wrapper, {Rotation = entry.definition.angle + (hovered and -2 or 0)})
-    animate(entry, entry.plate, {ImageColor3 = fill})
-    animate(entry, entry.fallback, {BackgroundColor3 = fill})
-    animate(entry, entry.text, {TextColor3 = text})
-    animate(entry, entry.glow, {ImageTransparency = hovered and 0.28 or 0.64})
-    animate(entry, entry.badgeOutline, {Color = hovered and BLUE_GLOW or WHITE})
-    animate(entry, entry.accent, {ImageColor3 = hovered and Color3.fromRGB(85, 188, 255) or BLUE_GLOW})
-end
-for _, definition in ipairs(ribbonDefinitions) do
-    local wrapper = make("Frame", {
-        Name = definition.id .. "Ribbon", AnchorPoint = Vector2.new(0.5, 0.5),
-        Position = UDim2.fromOffset(definition.x, definition.y), Size = UDim2.fromOffset(326, 92),
-        Rotation = definition.angle, BackgroundTransparency = 1, BorderSizePixel = 0,
-    }, menuCanvas)
-    local scale = make("UIScale", {Scale = 1}, wrapper)
-    local glow = ribbonImage(wrapper, "BlueGlow", ASSET_IDS.RibbonGlow, -62, -40, 448, 168, BLUE_GLOW, 0.64, 1)
-    local accentFallback = make("Frame", {
-        Name = "NativeAccent", Position = UDim2.fromOffset(10, 32), Size = UDim2.fromOffset(308, 49),
-        Rotation = -5, BackgroundColor3 = BLUE_GLOW, BorderSizePixel = 0, ZIndex = 2,
-    }, wrapper)
-    local accent = ribbonImage(wrapper, "BlueSlash", ASSET_IDS.AccentSlash, -10, 16, 350, 88, BLUE_GLOW, 0, 3)
-    local fallback = make("Frame", {
-        Name = "NativePlate", Position = UDim2.fromOffset(13, 6), Size = UDim2.fromOffset(298, 67),
-        BackgroundColor3 = INK, BorderSizePixel = 0, ZIndex = 4,
-    }, wrapper)
-    local fallbackOutline = make("UIStroke", {Color = BLUE_GLOW, Thickness = 1.5, Transparency = 0.55, ApplyStrokeMode = Enum.ApplyStrokeMode.Border}, fallback)
-    local plate = ribbonImage(wrapper, "ComicPlate", ASSET_IDS.RibbonMask, 2, -1, 324, 81, INK, 0, 5)
-    local function syncFallbacks()
-        fallback.Visible = plate.Image == "" or not plate.IsLoaded
-        accentFallback.Visible = accent.Image == "" or not accent.IsLoaded
+    entry.hovered = hovered
+    local fill, ink = hovered and WHITE or INK, hovered and INK or WHITE
+    for _, tween in ipairs(entry.tweens) do tween:Cancel() end
+    table.clear(entry.tweens)
+    local function tween(obj, goal)
+        local t=TweenService:Create(obj,TweenInfo.new(0.12,Enum.EasingStyle.Quad,Enum.EasingDirection.Out),goal)
+        table.insert(entry.tweens,t);t:Play()
     end
-    connect(plate:GetPropertyChangedSignal("IsLoaded"), syncFallbacks)
-    connect(accent:GetPropertyChangedSignal("IsLoaded"), syncFallbacks)
-    syncFallbacks()
-    local title = make("TextLabel", {
-        Name = "RibbonTitle", Position = UDim2.fromOffset(72, 5), Size = UDim2.fromOffset(236, 60),
-        BackgroundTransparency = 1, Text = definition.label, FontFace = RIBBON_FONT,
-        TextSize = definition.id == "Rollback" and 36 or 40, TextColor3 = WHITE,
-        TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Center,
-        ZIndex = 7, Active = false,
-    }, wrapper)
-    local badge = make("Frame", {
-        Name = "KeyBadge", Position = UDim2.fromOffset(5, 9), Size = UDim2.fromOffset(58, 58),
-        BackgroundColor3 = INK, BorderSizePixel = 0, ZIndex = 8, Active = false,
-    }, wrapper)
-    make("UICorner", {CornerRadius = UDim.new(0.5, 0)}, badge)
-    local badgeOutline = make("UIStroke", {Color = WHITE, Thickness = 2.5, ApplyStrokeMode = Enum.ApplyStrokeMode.Border}, badge)
-    local ring = make("Frame", {
-        Position = UDim2.fromOffset(6, 6), Size = UDim2.fromOffset(46, 46),
-        BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 8,
-    }, badge)
-    make("UICorner", {CornerRadius = UDim.new(0.5, 0)}, ring)
-    make("UIStroke", {Color = WHITE, Thickness = 1.2, Transparency = 0.55}, ring)
-    make("TextLabel", {
-        Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
-        Text = definition.key, FontFace = KEY_FONT, TextSize = 31, TextColor3 = WHITE, ZIndex = 9,
-    }, badge)
-    local hit = make("TextButton", {
-        Name = definition.id .. "Hitbox", Position = UDim2.fromOffset(0, 0),
-        Size = UDim2.fromOffset(326, 90), BackgroundTransparency = 1, BorderSizePixel = 0,
-        Text = "", AutoButtonColor = false, Active = true, Modal = true, ZIndex = 12,
-    }, wrapper)
-    local entry = {definition = definition, wrapper = wrapper, scale = scale, plate = plate,
-        fallback = fallback, text = title, glow = glow, accent = accent, badgeOutline = badgeOutline,
-        tweens = {}, hit = hit}
-    table.insert(ribbons, entry)
-    connect(hit.MouseEnter, function() if not closed then hoverRibbon(entry, true) end end)
-    connect(hit.MouseLeave, function() if not closed then hoverRibbon(entry, false) end end)
-    connect(hit.SelectionGained, function() if not closed then hoverRibbon(entry, true) end end)
-    connect(hit.SelectionLost, function() if not closed then hoverRibbon(entry, false) end end)
-    connect(hit.Activated, function() if openCategory then openCategory(definition.id) end end)
+    tween(entry.plate,{ImageColor3=fill}); tween(entry.fallback,{BackgroundColor3=fill})
+    tween(entry.text,{TextColor3=ink}); tween(entry.glow,{ImageTransparency=hovered and 0.28 or 0.64})
+    tween(entry.badgeOutline,{Color=hovered and BLUE_GLOW or WHITE})
+    if entry.rear then
+        tween(entry.rear.plate,{ImageColor3=fill})
+        tween(entry.rear.fallback,{BackgroundColor3=fill})
+        tween(entry.rear.text,{TextColor3=ink})
+        tween(entry.rear.glow,{ImageTransparency=hovered and 0.28 or 0.64})
+        tween(entry.rear.badgeOutline,{Color=hovered and BLUE_GLOW or WHITE})
+    end
 end
-local menuStatus = make("TextLabel", {
-    Name = "MenuStatus", Position = UDim2.fromOffset(260, 478), Size = UDim2.fromOffset(400, 26),
-    BackgroundTransparency = 1, Text = "LOADING BUILD...", FontFace = RIBBON_FONT,
-    TextSize = 21, TextColor3 = WHITE, TextStrokeColor3 = INK, TextStrokeTransparency = 0.2,
-}, menuCanvas)
-make("TextLabel", {
-    Position = UDim2.fromOffset(220, 511), Size = UDim2.fromOffset(480, 23),
-    BackgroundTransparency = 1, Text = "K  MENU     1-6  SELECT     P  UNLOAD", FontFace = RIBBON_FONT,
-    TextSize = 17, TextColor3 = Color3.fromRGB(215, 237, 255), TextStrokeTransparency = 0.25,
-}, menuCanvas)
-local back = make("TextButton", {
-    Name = "BackToRibbons", Position = UDim2.fromOffset(28, 26), Size = UDim2.fromOffset(65, 28),
-    BackgroundColor3 = INK, BorderSizePixel = 0, Text = "BACK", FontFace = RIBBON_FONT,
-    TextSize = 21, TextColor3 = WHITE, ZIndex = 20, Active = true, Modal = true,
-}, window)
-local stop = make("TextButton", {
-    Name = "AlwaysAvailableStop", Position = UDim2.new(0, 28, 1, -39), Size = UDim2.new(1, -56, 0, 27),
-    BackgroundColor3 = INK, BorderSizePixel = 0, Text = "STOP REROLLS  /  K TO RETURN", FontFace = RIBBON_FONT,
-    TextSize = 17, TextColor3 = WHITE, Active = true, ZIndex = 20,
-}, window)
-styleButton(back); styleButton(stop)
-connect(stop.Activated, function() stopRolling() end)
-local transitioning = false
-local transitionSerial = 0
-local transitionTweens = {}
-local symbolOffsets = {Build = 0, Weapon = 1, Traits = 2, Flow = 3, Rollback = 4, Slots = 5}
-local transitionLayer = make("Frame", {
-    Name = "ComicTransition", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
-    Visible = false, ZIndex = 30, ClipsDescendants = false,
-}, menuCanvas)
-local impact = ribbonImage(transitionLayer, "SelectionImpact", ASSET_IDS.ImpactBurst, 204, 24, 512, 512, BLUE_GLOW, 0.45, 30)
-local sweep = make("Frame", {
-    Name = "RibbonWipe", AnchorPoint = Vector2.new(0.5, 0.5),
-    Position = UDim2.fromOffset(-MENU.Width, MENU.Height * 0.5), Size = UDim2.fromOffset(1600, 300),
-    Rotation = -12, BackgroundTransparency = 1, ZIndex = 31,
-}, transitionLayer)
-local sweepFallback = make("Frame", {
-    Name = "LaunchFallback", Position = UDim2.fromOffset(0, 60), Size = UDim2.new(1, 0, 0, 150),
-    BackgroundColor3 = INK, BorderSizePixel = 0, ZIndex = 31,
-}, sweep)
-make("UIStroke", {Color = WHITE, Thickness = 3}, sweepFallback)
-make("Frame", {Position = UDim2.new(0, 0, 1, 5), Size = UDim2.new(1, 0, 0, 40), BackgroundColor3 = BLUE_GLOW, BorderSizePixel = 0}, sweepFallback)
-local launchImage = ribbonImage(sweep, "LaunchRibbon", ASSET_IDS.LaunchRibbon, 0, 0, 1600, 300, WHITE, 0, 32)
-ribbonImage(sweep, "LaunchStreaks", ASSET_IDS.LaunchStreaks, -80, -12, 1760, 330, WHITE, 0.18, 33)
-local sweepTitle = make("TextLabel", {
-    Name = "LaunchTitle", Position = UDim2.fromOffset(470, 54), Size = UDim2.fromOffset(700, 124),
-    BackgroundTransparency = 1, Text = "BUILD", FontFace = RIBBON_FONT, TextSize = 88,
-    TextColor3 = WHITE, TextStrokeColor3 = INK, TextStrokeTransparency = 0, ZIndex = 35,
-}, sweep)
-local sweepSymbol = make("ImageLabel", {
-    Name = "LaunchSymbol", Position = UDim2.fromOffset(422, 78), Size = UDim2.fromOffset(74, 74),
-    BackgroundTransparency = 1, Image = assetUri(ASSET_IDS.CategorySymbols), ImageColor3 = WHITE,
-    ImageRectSize = Vector2.new(128, 128), ImageRectOffset = Vector2.new(0, 0), ZIndex = 35,
-}, sweep)
-local function syncLaunchFallback() sweepFallback.Visible = launchImage.Image == "" or not launchImage.IsLoaded end
-connect(launchImage:GetPropertyChangedSignal("IsLoaded"), syncLaunchFallback); syncLaunchFallback()
+local function createSurface(definition, layer)
+    local canvasWidth,canvasHeight=layer=="Front" and 326 or 448,layer=="Front" and 92 or 168
+    local studsPerPixel=MENU.RibbonStudWidth*MENU.WorldScale/448
+    local part=make("Part", {
+        Name=definition.id..layer, Anchored=true, Transparency=1, CanCollide=false,
+        CanTouch=false, CanQuery=false, CastShadow=false,
+        Size=Vector3.new(canvasWidth*studsPerPixel,canvasHeight*studsPerPixel,0.025),
+    },worldFolder)
+    part.CanQuery=false
+    local surface=make("SurfaceGui", {
+        Name="LOCKED_3D_"..definition.id.."_"..layer, Adornee=part,
+        Face=Enum.NormalId.Back, SizingMode=Enum.SurfaceGuiSizingMode.FixedSize,
+        CanvasSize=Vector2.new(canvasWidth,canvasHeight), AlwaysOnTop=true, LightInfluence=0,
+        Active=layer=="Front", Enabled=false, ResetOnSpawn=false,
+        MaxDistance=MENU.MaxDistance, ClipsDescendants=false, ZIndexBehavior=Enum.ZIndexBehavior.Sibling,
+    },playerGui)
+    table.insert(worldSurfaces,surface)
+    make("ObjectValue", {Name=definition.id..layer,Value=surface},menuGui)
+    local wrapper=make("Frame", {
+        Name=definition.id..(layer=="Front" and "Ribbon" or "AccentLayer"),
+        Position=layer=="Front" and UDim2.fromOffset(0,0) or UDim2.fromOffset(62,40),Size=UDim2.fromOffset(326,92),
+        BackgroundTransparency=1,BorderSizePixel=0,
+    },surface)
+    return part,surface,wrapper
+end
+-- SurfaceGui draws one face. Compose the complete ribbon on the opposite
+-- face of its backing plane so the blue accent cannot cover the rear text.
+local function createRearSurface(definition, backPart, backSurface, wrapper)
+    local rearSurface=backSurface:Clone()
+    rearSurface.Name="LOCKED_3D_"..definition.id.."_Rear"
+    rearSurface.Adornee=backPart
+    rearSurface.Face=Enum.NormalId.Front
+    rearSurface.Active=true
+    rearSurface.Enabled=false
+    local rearAccent=rearSurface:FindFirstChild(definition.id.."AccentLayer")
+    rearAccent.Name=definition.id.."RearAccentLayer"
+    rearAccent.ZIndex=1
+    local rearWrapper=wrapper:Clone()
+    rearWrapper.Name=definition.id.."RearRibbon"
+    rearWrapper.Position=UDim2.fromOffset(62,40)
+    rearWrapper.ZIndex=2
+    rearWrapper.Parent=rearSurface
+    local rearHit=rearWrapper:FindFirstChild(definition.id.."Hitbox")
+    rearHit.Name=definition.id.."RearHitbox"
+    rearSurface.Parent=playerGui
+    table.insert(worldSurfaces,rearSurface)
+    make("ObjectValue",{Name=definition.id.."Rear",Value=rearSurface},menuGui)
+    local rear={surface=rearSurface,hit=rearHit,
+        plate=rearWrapper:FindFirstChild("ComicPlate"),fallback=rearWrapper:FindFirstChild("NativePlate"),
+        text=rearWrapper:FindFirstChild("RibbonTitle"),glow=rearAccent:FindFirstChild("BlueGlow"),
+        accent=rearAccent:FindFirstChild("BlueSlash"),accentFallback=rearAccent:FindFirstChild("NativeAccent"),
+        badgeOutline=rearWrapper:FindFirstChild("KeyBadge"):FindFirstChildOfClass("UIStroke")}
+    local function syncRearFallbacks()
+        rear.fallback.Visible=rear.plate.Image=="" or not rear.plate.IsLoaded
+        rear.accentFallback.Visible=rear.accent.Image=="" or not rear.accent.IsLoaded
+    end
+    connect(rear.plate:GetPropertyChangedSignal("IsLoaded"),syncRearFallbacks)
+    connect(rear.accent:GetPropertyChangedSignal("IsLoaded"),syncRearFallbacks)
+    syncRearFallbacks()
+    return rear
+end
+for _,definition in ipairs(ribbonDefinitions)do
+    local backPart,backSurface,backWrapper=createSurface(definition,"Back")
+    local frontPart,frontSurface,wrapper=createSurface(definition,"Front")
+    local glow=ribbonImage(backWrapper,"BlueGlow",ASSET_IDS.RibbonGlow,-62,-40,448,168,BLUE_GLOW,0.64,1)
+    local accentFallback=make("Frame",{Name="NativeAccent",Position=UDim2.fromOffset(10,32),Size=UDim2.fromOffset(308,49),Rotation=-5,BackgroundColor3=BLUE_GLOW,BorderSizePixel=0,ZIndex=2},backWrapper)
+    local accent=ribbonImage(backWrapper,"BlueSlash",ASSET_IDS.AccentSlash,-10,16,350,88,BLUE_GLOW,0,3)
+    local fallback=make("Frame",{Name="NativePlate",Position=UDim2.fromOffset(13,6),Size=UDim2.fromOffset(298,67),BackgroundColor3=INK,BorderSizePixel=0,ZIndex=4},wrapper)
+    make("UIStroke",{Color=BLUE_GLOW,Thickness=1.5,Transparency=0.5},fallback)
+    local plate=ribbonImage(wrapper,"ComicPlate",ASSET_IDS.RibbonMask,2,-1,324,81,INK,0,5)
+    local function syncFallbacks()
+        fallback.Visible=plate.Image=="" or not plate.IsLoaded
+        accentFallback.Visible=accent.Image=="" or not accent.IsLoaded
+    end
+    connect(plate:GetPropertyChangedSignal("IsLoaded"),syncFallbacks)
+    connect(accent:GetPropertyChangedSignal("IsLoaded"),syncFallbacks);syncFallbacks()
+    local title=make("TextLabel",{
+        Name="RibbonTitle",Position=UDim2.fromOffset(72,5),Size=UDim2.fromOffset(236,60),
+        BackgroundTransparency=1,Text=definition.label,FontFace=RIBBON_FONT,
+        TextSize=#definition.label>10 and 28 or (#definition.label>6 and 33 or 40),
+        TextColor3=WHITE,TextXAlignment=Enum.TextXAlignment.Left,ZIndex=7,
+    },wrapper)
+    local badge=make("Frame",{Name="KeyBadge",Position=UDim2.fromOffset(5,9),Size=UDim2.fromOffset(58,58),BackgroundColor3=INK,BorderSizePixel=0,ZIndex=8},wrapper)
+    make("UICorner",{CornerRadius=UDim.new(0.5,0)},badge)
+    local badgeOutline=make("UIStroke",{Color=WHITE,Thickness=2.5,ApplyStrokeMode=Enum.ApplyStrokeMode.Border},badge)
+    make("TextLabel",{Size=UDim2.fromScale(1,1),BackgroundTransparency=1,Text=definition.key,FontFace=KEY_FONT,TextSize=31,TextColor3=WHITE,ZIndex=9},badge)
+    local hit=make("TextButton",{Name=definition.id.."Hitbox",Size=UDim2.fromOffset(326,90),BackgroundTransparency=1,BorderSizePixel=0,Text="",AutoButtonColor=false,Active=true,ZIndex=12},wrapper)
+    local entry={definition=definition,frontPart=frontPart,backPart=backPart,frontSurface=frontSurface,backSurface=backSurface,
+        wrapper=wrapper,plate=plate,fallback=fallback,text=title,glow=glow,badgeOutline=badgeOutline,
+        hovered=false,hoverDepth=0,tweens={},hit=hit,
+        localFrame=CFrame.new(definition.x*MENU.WorldScale,definition.y*MENU.WorldScale,definition.z*MENU.WorldScale)*CFrame.Angles(math.rad(definition.pitch),math.rad(definition.yaw),math.rad(definition.roll))}
+    entry.rear=createRearSurface(definition,backPart,backSurface,wrapper)
+    table.insert(ribbons,entry)
+    connect(entry.rear.hit.MouseEnter,function()if not closed then hoverRibbon(entry,true)end end)
+    connect(entry.rear.hit.MouseLeave,function()if not closed then hoverRibbon(entry,false)end end)
+    connect(entry.rear.hit.SelectionGained,function()if not closed then hoverRibbon(entry,true)end end)
+    connect(entry.rear.hit.SelectionLost,function()if not closed then hoverRibbon(entry,false)end end)
+    connect(entry.rear.hit.Activated,function()if activateEntry then activateEntry(definition.id)end end)
+    connect(hit.MouseEnter,function()if not closed then hoverRibbon(entry,true)end end)
+    connect(hit.MouseLeave,function()if not closed then hoverRibbon(entry,false)end end)
+    connect(hit.SelectionGained,function()if not closed then hoverRibbon(entry,true)end end)
+    connect(hit.SelectionLost,function()if not closed then hoverRibbon(entry,false)end end)
+    connect(hit.Activated,function()if activateEntry then activateEntry(definition.id)end end)
+end
+local statusGui=make("BillboardGui",{
+    Name="LOCKED_3D_Status",Size=UDim2.fromOffset(500,62),StudsOffset=Vector3.new(0,-5.7,0),
+    AlwaysOnTop=true,LightInfluence=0,MaxDistance=MENU.MaxDistance,Enabled=false,ResetOnSpawn=false,
+},playerGui)
+table.insert(worldSurfaces,statusGui)
+local menuStatus=make("TextLabel",{Name="MenuStatus",Size=UDim2.new(1,0,0,28),BackgroundTransparency=1,Text="READING YOUR BUILD...",FontFace=RIBBON_FONT,TextSize=19,TextColor3=WHITE,TextStrokeColor3=INK,TextStrokeTransparency=0.05,TextTruncate=Enum.TextTruncate.AtEnd},statusGui)
+make("TextLabel",{Position=UDim2.fromOffset(0,30),Size=UDim2.new(1,0,0,24),BackgroundTransparency=1,Text="K  MENU     1-8  SELECT     P  UNLOAD",FontFace=RIBBON_FONT,TextSize=17,TextColor3=Color3.fromRGB(200,229,255),TextStrokeTransparency=0.15},statusGui)
+
+-- Detail pages and the selection wipe are screen-space and stay above game UI.
+local menuCanvas=make("Frame",{
+    Name="TransitionCanvas",AnchorPoint=Vector2.new(0.5,0.5),Position=UDim2.fromScale(0.5,0.5),
+    Size=UDim2.fromOffset(MENU.Width,MENU.Height),BackgroundTransparency=1,ZIndex=50,Visible=false,
+},gui)
+local menuScale=make("UIScale",{Scale=1},menuCanvas)
+local back=make("TextButton",{
+    Name="BackToRibbons",Position=UDim2.new(1,-117,0,27),Size=UDim2.fromOffset(85,28),
+    BackgroundColor3=INK,BorderSizePixel=0,Text="K  BACK",FontFace=RIBBON_FONT,TextSize=21,
+    TextColor3=WHITE,ZIndex=20,Active=true,Modal=true,
+},window)
+local stop=make("TextButton",{
+    Name="AlwaysAvailableStop",Position=UDim2.new(0,28,1,-39),Size=UDim2.new(1,-56,0,27),
+    BackgroundColor3=INK,BorderSizePixel=0,Text="STOP ALL REROLLS",FontFace=RIBBON_FONT,
+    TextSize=18,TextColor3=WHITE,Active=true,ZIndex=20,
+},window)
+styleButton(back);styleButton(stop)
+connect(stop.Activated,function()stopRolling()end)
+local transitioning,transitionSerial=false,0
+local transitionTweens={}
+local transitionLayer=make("Frame",{Name="ComicTransition",Size=UDim2.fromScale(1,1),BackgroundTransparency=1,Visible=false,ZIndex=30,ClipsDescendants=false},menuCanvas)
+local impact=ribbonImage(transitionLayer,"SelectionImpact",ASSET_IDS.ImpactBurst,204,24,512,512,BLUE_GLOW,0.45,30)
+local sweep=make("Frame",{Name="RibbonWipe",AnchorPoint=Vector2.new(0.5,0.5),Size=UDim2.fromOffset(1600,300),Rotation=-12,BackgroundTransparency=1,ZIndex=31},transitionLayer)
+local sweepFallback=make("Frame",{Name="LaunchFallback",Position=UDim2.fromOffset(0,60),Size=UDim2.new(1,0,0,150),BackgroundColor3=INK,BorderSizePixel=0,ZIndex=31},sweep)
+make("UIStroke",{Color=WHITE,Thickness=3},sweepFallback)
+make("Frame",{Position=UDim2.new(0,0,1,5),Size=UDim2.new(1,0,0,40),BackgroundColor3=BLUE_GLOW,BorderSizePixel=0},sweepFallback)
+local launchImage=ribbonImage(sweep,"LaunchRibbon",ASSET_IDS.LaunchRibbon,0,0,1600,300,WHITE,0,32)
+ribbonImage(sweep,"LaunchStreaks",ASSET_IDS.LaunchStreaks,-80,-12,1760,330,WHITE,0.18,33)
+local sweepTitle=make("TextLabel",{Name="LaunchTitle",Position=UDim2.fromOffset(470,54),Size=UDim2.fromOffset(700,124),BackgroundTransparency=1,Text="BUILD",FontFace=RIBBON_FONT,TextSize=88,TextColor3=WHITE,TextStrokeColor3=INK,TextStrokeTransparency=0,ZIndex=35},sweep)
+local sweepSymbol=make("ImageLabel",{Name="LaunchSymbol",Position=UDim2.fromOffset(422,78),Size=UDim2.fromOffset(74,74),BackgroundTransparency=1,Image=assetUri(ASSET_IDS.CategorySymbols),ImageColor3=WHITE,ImageRectSize=Vector2.new(128,128),ZIndex=35},sweep)
+local function syncLaunchFallback()sweepFallback.Visible=launchImage.Image=="" or not launchImage.IsLoaded end
+connect(launchImage:GetPropertyChangedSignal("IsLoaded"),syncLaunchFallback);syncLaunchFallback()
 local function cancelTransition()
-    transitionSerial = transitionSerial + 1
-    transitioning, transitionLayer.Visible = false, false
-    for _, tween in ipairs(transitionTweens) do tween:Cancel() end
+    transitionSerial=transitionSerial+1
+    transitioning,transitionLayer.Visible,menuCanvas.Visible=false,false,false
+    for _,tween in ipairs(transitionTweens)do tween:Cancel()end
     table.clear(transitionTweens)
 end
 local function showCategoryContents(category)
-    -- Put the selected controls first; live build details have their own page.
-    -- This keeps the long live-build list from hiding Flow / Rollback controls.
-    local columns = categoryCards[category]
-    for _, frame in pairs(cardsByTitle) do frame.Visible = false end
-    for columnIndex, titles in ipairs(columns) do
-        for index, title in ipairs(titles) do
-            local frame = cardsByTitle[title]
-            frame.Parent = columnIndex == 1 and left or right
-            frame.LayoutOrder, frame.Visible = index, true
+    for _,frame in pairs(cardsByTitle)do frame.Visible=false end
+    for columnIndex,titles in ipairs(categoryCards[category])do
+        for index,title in ipairs(titles)do
+            local frame=cardsByTitle[title]
+            frame.Parent=columnIndex==1 and left or right
+            frame.LayoutOrder,frame.Visible=index,true
         end
     end
-    left.CanvasPosition, right.CanvasPosition = Vector2.new(0, 0), Vector2.new(0, 0)
-    menuCategory, menuVisible = category, false
-    panelCategoryTitle.Text = category == "Slots" and "DUPE SLOT" or string.upper(category)
-    panelSymbol.ImageRectOffset = Vector2.new((symbolOffsets[category] or 0) * 128, 0)
-    root.Visible, window.GroupTransparency = true, 0
+    left.CanvasPosition,right.CanvasPosition=Vector2.new(0,0),Vector2.new(0,0)
+    menuCategory,menuVisible=category,false
+    panelCategoryTitle.Text=string.upper(category)
+    panelBadgeText.Text=category=="Build" and "1" or "2"
+    root.Visible,window.GroupTransparency=true,0
     updateWorldMenu()
 end
-showRibbons = function()
+showRibbons=function()
     if closed then return end
-    cancelTransition(); closeDropdown()
-    root.Visible = false
-    menuCategory, menuVisible = nil, true
-    for _, entry in ipairs(ribbons) do entry.wrapper.Visible = true; hoverRibbon(entry, false) end
+    cancelTransition();closeDropdown()
+    root.Visible=false;menuCategory,menuVisible=nil,true
+    for _,entry in ipairs(ribbons)do hoverRibbon(entry,false)end
     updateWorldMenu()
 end
-openCategory = function(category, instant)
+openCategory=function(category,instant)
     if closed or not categoryCards[category] or transitioning then return end
     closeDropdown()
-    if instant or not MENU.ClickTransition then showCategoryContents(category); return end
-    transitionSerial = transitionSerial + 1
-    local token = transitionSerial
-    transitioning, menuCategory, menuVisible = true, category, false
-    root.Visible = false
-    for _, entry in ipairs(ribbons) do entry.wrapper.Visible = false end
-    sweepTitle.Text = category == "Slots" and "DUPE SLOT" or string.upper(category)
-    sweepSymbol.ImageRectOffset = Vector2.new((symbolOffsets[category] or 0) * 128, 0)
-    sweep.Position = UDim2.fromOffset(-MENU.Width * 1.6, MENU.Height * 0.5 + 105)
-    impact.ImageTransparency = 0.55
-    transitionLayer.Visible = true
+    if instant or not MENU.ClickTransition then showCategoryContents(category);return end
+    transitionSerial=transitionSerial+1
+    local token=transitionSerial
+    transitioning,menuCategory,menuVisible=true,category,false
+    root.Visible=false
+    sweepTitle.Text=string.upper(category)
+    sweepSymbol.ImageRectOffset=Vector2.new(category=="Build" and 0 or 384,0)
+    sweep.Position=UDim2.fromOffset(-MENU.Width*1.6,MENU.Height*0.5+105)
+    impact.ImageTransparency=0.55
+    transitionLayer.Visible,menuCanvas.Visible=true,true
     updateWorldMenu()
-    local duration = math.clamp(MENU.TransitionSeconds, 0.24, 1.2)
-    local function play(obj, time, direction, goal)
-        local tween = TweenService:Create(obj, TweenInfo.new(time, Enum.EasingStyle.Quad, direction), goal)
-        table.insert(transitionTweens, tween); tween:Play()
+    local duration=math.clamp(MENU.TransitionSeconds,0.24,1.2)
+    local function play(obj,time,direction,goal)
+        local tween=TweenService:Create(obj,TweenInfo.new(time,Enum.EasingStyle.Quad,direction),goal)
+        table.insert(transitionTweens,tween);tween:Play()
     end
-    play(sweep, duration * 0.34, Enum.EasingDirection.Out, {Position = UDim2.fromOffset(MENU.Width * 0.5, MENU.Height * 0.5)})
-    play(impact, duration * 0.72, Enum.EasingDirection.Out, {ImageTransparency = 1})
-    task.delay(duration * 0.62, function()
-        if closed or token ~= transitionSerial then return end
-        play(sweep, duration * 0.34, Enum.EasingDirection.In, {Position = UDim2.fromOffset(MENU.Width * 2.6, MENU.Height * 0.5 - 105)})
+    play(sweep,duration*0.34,Enum.EasingDirection.Out,{Position=UDim2.fromOffset(MENU.Width*0.5,MENU.Height*0.5)})
+    play(impact,duration*0.72,Enum.EasingDirection.Out,{ImageTransparency=1})
+    task.delay(duration*0.62,function()
+        if closed or token~=transitionSerial then return end
+        play(sweep,duration*0.34,Enum.EasingDirection.In,{Position=UDim2.fromOffset(MENU.Width*2.6,MENU.Height*0.5-105)})
     end)
-    task.delay(duration, function()
-        if closed or token ~= transitionSerial then return end
-        transitioning, transitionLayer.Visible = false, false
-        table.clear(transitionTweens)
-        showCategoryContents(category)
+    task.delay(duration,function()
+        if closed or token~=transitionSerial then return end
+        transitioning,transitionLayer.Visible,menuCanvas.Visible=false,false,false
+        table.clear(transitionTweens);showCategoryContents(category)
     end)
 end
-connect(back.Activated, showRibbons)
-local currentMenuScale
-local layoutSignature
-local function fitWorldPanels(dt)
-    local camera = workspace.CurrentCamera
-    local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
-    local targetScale = MENU.Scale
-    local anchor = menuGui.Adornee
-    if camera and anchor then
-        local center = camera:WorldToViewportPoint(anchor.Position)
-        local above = camera:WorldToViewportPoint(anchor.Position + camera.CFrame.UpVector)
-        if center.Z > 0 then
-            local dx, dy = above.X - center.X, above.Y - center.Y
-            local pixelsPerStud = math.sqrt(dx * dx + dy * dy)
-            targetScale = math.clamp(pixelsPerStud * MENU.WorldWidth / MENU.Width, MENU.MinScale, MENU.Scale)
+activateEntry=function(id)
+    if closed or transitioning or root.Visible then return end
+    if categoryCards[id]then openCategory(id);return end
+    local actions={Rollback=manualRollback,DupeSlot=dupeSlot,ThirdSlot=thirdSlot,Quests=redeemQuests,Codes=redeemCodes,Emotes=getEmotes}
+    local action=actions[id]
+    if action then action()end
+end
+connect(back.Activated,showRibbons)
+local spatialYaw,spatialAnchor,layoutSignature
+local function currentAnchor()
+    local character=player.Character
+    return character and(character:FindFirstChild("HumanoidRootPart")or character:FindFirstChild("UpperTorso")or character:FindFirstChild("Torso")or character:FindFirstChild("Head"))
+end
+local function fitScreenPanel()
+    local camera=workspace.CurrentCamera
+    local viewport=camera and camera.ViewportSize or Vector2.new(1280,720)
+    local width=math.clamp(window.Size.X.Offset,CONFIG.MinWidth,CONFIG.MaxWidth)
+    local height=math.clamp(window.Size.Y.Offset,CONFIG.MinHeight,CONFIG.MaxHeight)
+    local signature=string.format("%g:%g:%g:%g",viewport.X,viewport.Y,width,height)
+    if signature==layoutSignature then return end
+    layoutSignature=signature
+    window.Size,window.Position=UDim2.fromOffset(width,height),UDim2.fromOffset(24,24)
+    local canvasW,canvasH=width+48,height+48
+    root.Size=UDim2.fromOffset(canvasW,canvasH)
+    detailScale.Scale=math.max(0.1,math.min(MENU.PanelScale,(viewport.X-28)/canvasW,(viewport.Y-40)/canvasH))
+    menuScale.Scale=math.max(0.1,math.min(1,(viewport.X-24)/MENU.Width,(viewport.Y-24)/MENU.Height))
+end
+local function updateSpatialMenu(dt)
+    if closed then return end
+    local anchor,camera=currentAnchor(),workspace.CurrentCamera
+    local visible=anchor~=nil and camera~=nil and menuVisible and not root.Visible and not transitioning
+    if anchor~=spatialAnchor then spatialAnchor,spatialYaw=anchor,nil end
+    local basis
+    if visible then
+        local delta=camera.CFrame.Position-anchor.Position
+        local flat=Vector3.new(delta.X,0,delta.Z)
+        if flat.Magnitude<0.1 then
+            local look=camera.CFrame.LookVector
+            flat=Vector3.new(-look.X,0,-look.Z)
+        end
+        if flat.Magnitude<0.1 then flat=Vector3.new(0,0,1)end
+        local target=CFrame.lookAt(Vector3.new(0,0,0),Vector3.new(-flat.X,0,-flat.Z))
+        spatialYaw=spatialYaw and spatialYaw:Lerp(target,1-math.exp(-MENU.OrbitFollowSpeed*(dt or 1/60)))or target
+        basis=CFrame.new(anchor.Position+Vector3.new(0,MENU.VerticalOffset,0))*spatialYaw
+    end
+    for _,entry in ipairs(ribbons)do
+        if visible then
+            local amount=1-math.exp(-14*(dt or 1/60))
+            entry.hoverDepth=entry.hoverDepth+((entry.hovered and MENU.HoverDepth or 0)-entry.hoverDepth)*amount
+            local pose=basis*entry.localFrame
+            local viewingRear=(camera.CFrame.Position-pose.Position):Dot(pose.LookVector)>0
+            -- Only the visible side receives input, so one click runs one action.
+            entry.frontSurface.Enabled,entry.backSurface.Enabled=not viewingRear,not viewingRear
+            entry.rear.surface.Enabled=viewingRear
+            entry.frontPart.CanQuery,entry.backPart.CanQuery=not viewingRear,viewingRear
+            entry.frontPart.CFrame=pose*CFrame.new(0,0,entry.hoverDepth)
+            entry.backPart.CFrame=pose*CFrame.new(0,0,-MENU.LayerDepth-(viewingRear and entry.hoverDepth or 0))
+        else
+            entry.frontSurface.Enabled,entry.backSurface.Enabled,entry.rear.surface.Enabled=false,false,false
+            entry.frontPart.CanQuery,entry.backPart.CanQuery=false,false
         end
     end
-    targetScale = math.min(targetScale, (viewport.X - 28) / MENU.Width, (viewport.Y - 28) / MENU.Height)
-    targetScale = math.max(0.05, targetScale)
-    if not currentMenuScale or not dt then currentMenuScale = targetScale
-    else currentMenuScale = currentMenuScale + (targetScale - currentMenuScale) * (1 - math.exp(-MENU.ScaleFollowSpeed * dt)) end
-    menuScale.Scale = currentMenuScale
-    menuGui.Size = UDim2.fromOffset(MENU.Width * currentMenuScale, MENU.Height * currentMenuScale)
-    local width = math.clamp(window.Size.X.Offset, CONFIG.MinWidth, CONFIG.MaxWidth)
-    local height = math.clamp(window.Size.Y.Offset, CONFIG.MinHeight, CONFIG.MaxHeight)
-    local signature = string.format("%g:%g:%g:%g", viewport.X, viewport.Y, width, height)
-    if signature == layoutSignature then return end
-    layoutSignature = signature
-    window.Size, window.Position = UDim2.fromOffset(width, height), UDim2.fromOffset(24, 24)
-    local canvasW, canvasH = width + 48, height + 48
-    local factor = math.max(0.1, math.min(MENU.PanelScale, (viewport.X - 32) / canvasW, (viewport.Y - 32) / canvasH))
-    root.Size, detailScale.Scale = UDim2.fromOffset(canvasW, canvasH), factor
-    gui.Size = UDim2.fromOffset(canvasW * factor, canvasH * factor)
+    statusGui.Adornee,statusGui.Enabled=anchor,visible
 end
-updateWorldMenu = function()
+updateWorldMenu=function()
     if closed then return end
-    local character = player.Character
-    local anchor = character and (character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("UpperTorso") or character:FindFirstChild("Torso") or character:FindFirstChild("Head"))
-    if gui.Adornee ~= anchor then gui.Adornee = anchor end
-    if menuGui.Adornee ~= anchor then menuGui.Adornee = anchor end
-    gui.Enabled = anchor ~= nil and root.Visible
-    menuGui.Enabled = anchor ~= nil and (menuVisible or transitioning) and not root.Visible
-    local jobName = activeJob and not activeJob.cancelled and activeJob.kind
-    menuStatus.Text = jobName and ("ROLLING " .. string.upper(jobName)) or ("YEN " .. (lastKnownYen ~= nil and tostring(lastKnownYen) or "LOADING..."))
+    gui.Enabled=root.Visible or transitioning
+    scrim.Visible=root.Visible
+    local jobName=activeJob and not activeJob.cancelled and activeJob.kind
+    local yen=lastKnownYen~=nil and tostring(lastKnownYen)or"LOADING..."
+    menuStatus.Text="YEN "..yen.."  /  "..(jobName and("RUNNING "..string.upper(jobName))or status.Text)
+    updateSpatialMenu(0)
 end
-connect(player.CharacterAdded, function()
-    gui.Adornee, menuGui.Adornee = nil, nil
-    task.defer(function() if not closed then updateWorldMenu() end end)
+connect(player.CharacterAdded,function()
+    spatialAnchor,spatialYaw=nil,nil
+    task.defer(function()if not closed then updateWorldMenu()end end)
 end)
-connect(UIS.InputBegan, function(input, processed)
-    if closed or UIS:GetFocusedTextBox() then return end
-    if input.KeyCode == Enum.KeyCode.P then unload(); return end
+connect(UIS.InputBegan,function(input,processed)
+    if closed or UIS:GetFocusedTextBox()then return end
+    if input.KeyCode==Enum.KeyCode.P then unload();return end
     if processed then return end
-    if input.KeyCode == MENU.ToggleKey then
+    if input.KeyCode==MENU.ToggleKey then
         if transitioning or root.Visible then showRibbons()
-        else menuVisible = not menuVisible; updateWorldMenu() end
+        else menuVisible=not menuVisible;updateWorldMenu()end
         return
     end
     if MENU.Shortcuts and menuVisible and not root.Visible then
-        for _, definition in ipairs(ribbonDefinitions) do
-            if input.KeyCode == definition.code then openCategory(definition.id); return end
+        for _,definition in ipairs(ribbonDefinitions)do
+            if input.KeyCode==definition.code then activateEntry(definition.id);return end
         end
     end
 end)
--- Named controls also make manual testing in Studio or an executor straightforward.
-session.openCategory, session.showRibbons = openCategory, showRibbons
-session.worldMenu, session.worldPanel = menuGui, gui
-updateWorldMenu()
-fitWorldPanels()
-connect(RunService.RenderStepped, function(dt)
-    if not closed then fitWorldPanels(dt) end
+session.openCategory,session.showRibbons,session.activateEntry=openCategory,showRibbons,activateEntry
+session.worldMenu,session.worldPanel,session.screenPanel=menuGui,gui,gui
+session.worldParts,session.worldSurfaces=worldFolder,worldSurfaces
+updateWorldMenu();fitScreenPanel()
+connect(RunService.RenderStepped,function(dt)
+    if not closed then fitScreenPanel();updateSpatialMenu(dt)end
 end)
 
 local function refreshBuild()
@@ -1565,7 +1627,7 @@ local function refreshBuild()
         local percent = build.Buff and string.format("%.1f%%", build.Buff) or "..."
         local color = build.Color and string.format("#%02X%02X%02X", math.floor(build.Color[1] + 0.5), math.floor(build.Color[2] + 0.5), math.floor(build.Color[3] + 0.5)) or "..."
         buildBrief.Text = string.format("FLOW  %s     BUFF  %s / %s     RGB  %s", build.Flow or "...", build.buffName or "...", percent, color)
-    elseif menuCategory == "Traits" then
+    elseif menuCategory == "Build" then
         buildBrief.Text = string.format("TRAIT  %s     HEIGHT  %s     FACE  %s", tostring(build.Trait or "..."), heightText(build.Height), tostring(build.Face or "..."))
     else
         buildBrief.Text = string.format("WEAPON  %s     TRAIT  %s     HEIGHT  %s", tostring(build.Weapon or "..."), tostring(build.Trait or "..."), heightText(build.Height))
@@ -1619,6 +1681,6 @@ if restored and restored.placeId == game.PlaceId and REMOTE_NAMES[restored.resum
     end)
 end
 ]====]
-local run, err = loadstring(source, "LOCKED Comic GUI")
+local run, err = loadstring(source, "LOCKED 3D Comic GUI")
 if not run then error(err) end
 run(source, nil)
